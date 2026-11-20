@@ -4,10 +4,15 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug)]
 pub enum Progress<'a> {
     ReadMesh,
+    ScanDefaultHiddenFaces,
     MatchCamouflage(&'a Path),
     FaceMatches {
         matched: usize,
         total: usize,
+    },
+    DefaultHiddenFaces {
+        nodes: usize,
+        removable: usize,
     },
     SeparateUvIslands,
     WritePainterMesh,
@@ -33,11 +38,18 @@ impl fmt::Display for Progress<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadMesh => f.write_str("Reading objects and material slots"),
+            Self::ScanDefaultHiddenFaces => f.write_str("Reading the game's default hidden nodes"),
             Self::MatchCamouflage(pack) => {
                 write!(f, "Matching game camouflage UVs from {}", pack.display())
             }
             Self::FaceMatches { matched, total } => {
                 write!(f, "Matched {matched} of {total} overall faces")
+            }
+            Self::DefaultHiddenFaces { nodes, removable } => {
+                write!(
+                    f,
+                    "{nodes} default hidden nodes, {removable} removable source triangles"
+                )
             }
             Self::SeparateUvIslands => f.write_str("Arranging Reused UVs for independent painting"),
             Self::WritePainterMesh => f.write_str("Exporting the Painter mesh"),

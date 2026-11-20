@@ -7,7 +7,7 @@ use super::{
 };
 use anyhow::{Result, ensure};
 use camo_translator::{
-    bake::{Alpha, ExportOptions},
+    bake::{Alpha, CAMO_SCALE_PERCENTS, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions},
     catalog::{is_game_root, user_skins},
     materials::TextureBinding,
     prepare::PAINTER_PNG_DIR,
@@ -234,6 +234,7 @@ pub struct ExportForm {
     name: String,
     size: u32,
     camo_size: u32, // Zero uses the base map size.
+    camo_scale_percent: u16,
     material: bool,
     alpha: Alpha,
     inspected: PathBuf,
@@ -256,6 +257,7 @@ impl ExportForm {
             name: String::new(),
             size: 4096,
             camo_size: 0,
+            camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
             material: false,
             alpha: Alpha::FixedWhite,
             inspected: PathBuf::new(),
@@ -342,8 +344,26 @@ impl ExportForm {
 
         ui.columns(2, |cols| {
             size_field(&mut cols[0], "原纹理尺寸", &mut self.size, false);
-            size_field(&mut cols[1], "Camo 尺寸", &mut self.camo_size, true);
+            size_field(&mut cols[1], "Camo 贴图分辨率", &mut self.camo_size, true);
         });
+        ui.add_space(5.0);
+        ui.label(theme::label("游戏内 Camo 缩放"));
+        ComboBox::from_id_salt("camo_scale")
+            .width(ui.available_width())
+            .height(270.0)
+            .selected_text(format!("{}%", self.camo_scale_percent))
+            .show_ui(ui, |ui| {
+                for percent in CAMO_SCALE_PERCENTS.into_iter().rev() {
+                    ui.selectable_value(
+                        &mut self.camo_scale_percent,
+                        percent,
+                        format!("{percent}%"),
+                    );
+                }
+            });
+        if self.alpha == Alpha::FixedWhite {
+            ui.label(theme::note("含 Camo 的涂装会在游戏中固定为所选比例"));
+        }
         ui.add_space(5.0);
         ui.label(theme::label("原颜色 Alpha"));
         ComboBox::from_id_salt("mask_mode")
@@ -480,6 +500,7 @@ impl ExportForm {
             } else {
                 self.camo_size
             },
+            camo_scale_percent: self.camo_scale_percent,
             material: self.material,
             alpha: self.alpha,
             slots: self.slots.iter().cloned().collect(),

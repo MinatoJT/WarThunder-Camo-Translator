@@ -14,6 +14,8 @@ Camo Translator 0.2 是 Windows 上的 Rust 桌面工具。它读取你选定的
 
 在源模型里，把需要独立绘制并交给游戏迷彩图的面放入名为 `Reused` 的网格对象或组，保留它们的原 UV 和材质槽。例如把裙板需要单独画的外表面放入 `Reused`，让烟雾弹等部件继续共用 UV。工具准备 Painter 网格时只为 `Reused` 拆开重叠，普通部件保留共用关系。
 
+点击 **生成 Painter 模型** 后，工具会读取所选载具的默认隐藏节点，并用顶点位置和原 UV 匹配源模型。你可以按节点查看源对象、材质槽和 UV 预览，在导出前选择 **保留全部面** 或 **移除默认隐藏面**。后者只移除新生成模型中整面均已确认隐藏的多边形。匹配不明确的面会保留。清单以游戏基础配置为准，随选装、预设或损伤切换的隐藏规则另由游戏处理。命令行默认保留，可传入 `--hidden-faces remove` 选择移除。
+
 用 `cargo build --release --locked` 构建。命令行请使用 `target\release\camo-translator-cli.exe`。从工具目录执行下列命令，把路径换成自己的。选择包含 `content` 目录的 War Thunder 安装根目录。
 
 ```powershell
@@ -37,7 +39,7 @@ $game = 'D:\Games\War Thunder'
 | `Painter.fbx` 或 `Painter.obj` | 导入 Painter 的模型。OBJ 的 `Painter.mtl` 提供原材质槽名。 |
 | `Painter PNG` | Painter 的 PNG 导出目录。 |
 | `project.json` | 保存对象、材质槽、载具贴图绑定及原 UV、Painter UV 和游戏 UV2 的对应。 |
-| `prepare-report.json` | 列出对象、每槽需要的 UDIM、DDS 文件名和成功匹配到 UV2 的三角面数。 |
+| `prepare-report.json` | 列出对象、每槽需要的 UDIM、DDS 文件名、UV2 匹配和默认隐藏面的扫描结果。 |
 
 在 Painter 新建工程时启用 **Use UV Tile workflow**，选择按材质保留 UV Tile 布局，使用生成的 UV。每个对象仍可单独选为 Geometry Mask。C4D 输入需要已保存的多边形模型和可运行的 `c4dpy`。OBJ 输入支持带原 UV 的三角面和四边面。工具用实际原 UV 和位置匹配游戏面，以米为单位，并识别常见的坐标轴方向。
 
@@ -54,11 +56,12 @@ $game = 'D:\Games\War Thunder'
 
 ```powershell
 & $tool export --project '.\projects\Leopard2A8' `
-    --slot Body --out (Join-Path $game 'UserSkins\my-first-body') --size 4096 --material
+    --slot Body --out (Join-Path $game 'UserSkins\my-first-body') --size 4096 --camo-scale 130 --material
 ```
 
 - 默认回写所有能对应游戏贴图的材质槽。可重复传入 `--slot` 只导出其中几个。90B OBJ 里的 Body 槽叫 `Body_1`。没有自动对应的材质槽可在导出页选择游戏贴图，命令行使用 `--binding 源槽=游戏贴图`。多个槽对应同一张游戏贴图时会合并回写。可用 `--textures` 指定其他 PNG 目录。
 - 加 `--material` 才读取后三张图并输出 `_n.dds`。通道固定为 R = 255 − Roughness、G = Normal.G、B = Metallic、A = Normal.R。
+- 在导出页通过 **游戏内 Camo 缩放** 选择游戏的 20% 到 200% 档位，默认 200%。工具按这个比例回写迷彩图，同时把比例写入 `.blk`。游戏加载含 Camo 的涂装时会自动固定为所选比例。命令行使用 `--camo-scale` 设置百分比。
 - 默认生成车型对应的 `.blk`。需要 Camo 的材质槽包含固定覆盖图 `_c.dds` 和游戏底图 `_camo_base.dds`。`_c.dds` 的 Alpha 决定固定色和迷彩的交界。`_camo_base.dds` 在 UV 岛和扩边内的 Alpha 统一为 255，让游戏对交界采样时底层保持连续。普通固定材质使用其原始贴图名生成替换配置。没有可缩放迷彩的材质使用固定贴图，复用的原 UV 会继续共用颜色。已有自定义配置时可用 `--alpha camo-white` 导出白色的 Reused 遮罩。
 - DDS 是 RGBA 8.8.8.8，单层，无 mipmap。导出时会给 UV 岛留出边缘像素，供游戏过滤采样。`--camo-size` 可以单独指定迷彩图尺寸。可再次导出到已有目录，同名的生成文件更新，其他文件保留。
 - `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。

@@ -186,6 +186,12 @@ impl Obj {
         let mut layout = BTreeMap::new();
         let mut snapshots = scene.faces.iter().peekable();
         for polygon in &self.polygons {
+            if !snapshots
+                .peek()
+                .is_some_and(|face| (face.object, face.polygon) == polygon.id)
+            {
+                continue;
+            }
             let mut corners = vec![None; polygon.indices.len()];
             while snapshots
                 .peek()
@@ -212,11 +218,15 @@ impl Obj {
         }
         let mut polygons = self.polygons.iter();
         for line in self.source.lines() {
-            match field(line).0 {
+            let (key, value) = field(line);
+            match key {
                 "vt" | "mtllib" => {}
+                "usemtl" if !scene.slots.iter().any(|slot| slot == value) => {}
                 "f" => {
                     let face = polygons.next().context("Missing OBJ face")?;
-                    let first = layout[&face.id];
+                    let Some(&first) = layout.get(&face.id) else {
+                        continue;
+                    };
                     write!(output, "f")?;
                     for (i, ix) in face.indices.iter().enumerate() {
                         match ix.normal {

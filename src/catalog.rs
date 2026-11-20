@@ -82,6 +82,20 @@ pub(crate) fn archive(file: &Path) -> Result<Vromfs> {
     Vromfs::parse(&data).with_context(|| format!("Reading {}", file.display()))
 }
 
+pub(crate) fn unit_config(root: &Path, vehicle: &InstalledVehicle) -> Result<Block> {
+    let (directory, _) = UNIT_DIRS
+        .iter()
+        .find(|(_, family)| *family == vehicle.family)
+        .context("Unknown game vehicle family")?;
+    let path = format!("{directory}{}.blk", vehicle.id);
+    let archive = archive(&root.join("aces.vromfs.bin"))?;
+    let shared = shared_context(&archive)?;
+    let unit = archive
+        .get(&path)
+        .with_context(|| format!("Missing game unit configuration {path}"))?;
+    blk::parse(&unit.data, shared.as_ref()).with_context(|| format!("Reading {path}"))
+}
+
 pub(crate) fn text<'a>(block: &'a Block, name: &str) -> Option<&'a str> {
     block.params.iter().find_map(|(key, value)| match value {
         Value::Str(text) if key == name => Some(text.as_str()),

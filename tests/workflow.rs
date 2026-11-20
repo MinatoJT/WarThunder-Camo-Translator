@@ -78,7 +78,7 @@ fn only_reused_faces_are_isolated_in_painter() {
 
 #[test]
 fn reuse_is_manual_and_packed_material_covers_both_layers() {
-    use camo_translator::bake::{Alpha, ExportOptions, export};
+    use camo_translator::bake::{Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions, export};
     use camo_translator::scene::{Object, Project, SCHEMA, Scene, write_json};
     use image::{Rgba, RgbaImage};
 
@@ -135,6 +135,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
     let mut options = ExportOptions {
         size: 128,
         camo_size: 128,
+        camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
         material: true,
         alpha: Alpha::FixedWhite,
         slots: vec!["Body".into()],
@@ -168,6 +169,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
             assert_eq!(pixel(&backing, 76, 96), wheel);
             assert_eq!(pixel(&backing, 64, 20), [0, 0, 0, 0]);
             let text = std::fs::read_to_string(config).unwrap();
+            assert!(text.lines().any(|line| line == "scale:r=2.000000"));
             assert!(text.contains("from:t=\"ger_camo_bronzegruen*\"\n  to:t=\"camo.dds\""));
             assert!(text.contains(
                 "set_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_c.dds\""
@@ -188,6 +190,28 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
             "artist notes"
         );
     }
+
+    options.camo_scale_percent = 130;
+    let scaled = base.join("scaled");
+    export(base, base, &scaled, &options).unwrap();
+    let camo = scaled.join("camo.dds");
+    assert_eq!(pixel(&camo, 9, 108), red);
+    assert_eq!(pixel(&camo, 108, 108), blue);
+    for name in [
+        "leopard_2a8_body_c.dds",
+        "leopard_2a8_body_camo_base.dds",
+        "leopard_2a8_body_n.dds",
+    ] {
+        assert_eq!(
+            std::fs::read(scaled.join(name)).unwrap(),
+            std::fs::read(base.join("out-0").join(name)).unwrap()
+        );
+    }
+    let text = std::fs::read_to_string(scaled.join("germ_leopard_2a8.blk")).unwrap();
+    assert!(text.lines().any(|line| line == "scale:r=1.300001"));
+    let report: serde_json::Value =
+        camo_translator::scene::read_json(&scaled.join("export-report.json")).unwrap();
+    assert_eq!(report["camo_scale_percent"], 130);
 
     // A texture has one alpha value per original UV. An unmarked face sharing it
     // keeps its fixed color, and the collision is reported.
@@ -214,7 +238,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
 
 #[test]
 fn newly_discovered_fixed_skin_writes_native_texture_names_and_preserves_alpha() {
-    use camo_translator::bake::{Alpha, ExportOptions, export};
+    use camo_translator::bake::{Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions, export};
     use camo_translator::materials::{SkinProfile, TextureBinding};
     use camo_translator::scene::{Object, Project, SCHEMA, Scene, write_json};
     use image::{Rgba, RgbaImage};
@@ -268,6 +292,7 @@ fn newly_discovered_fixed_skin_writes_native_texture_names_and_preserves_alpha()
     let options = ExportOptions {
         size: 128,
         camo_size: 128,
+        camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
         material: true,
         alpha: Alpha::FixedWhite,
         slots: vec!["Renamed material".into(), "Second material".into()],

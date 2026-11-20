@@ -2,6 +2,7 @@ use crate::catalog::InstalledVehicle;
 use crate::materials::{ModelMaterials, SkinProfile, TextureBinding, choose_binding};
 use crate::scene::{Face, Point, Scene, TriangleUv};
 use crate::vehicle::Vehicle;
+use crate::visibility::FaceVisibility;
 use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, HashMap};
 use wt_formats::dynmodel::{DynModel, Elem, VData, Vertex};
@@ -25,6 +26,7 @@ struct StockFace<'a> {
     base: TriangleUv,
     camo: Option<TriangleUv>,
     texture: Option<&'a TextureBinding>,
+    hidden_node: Option<usize>,
 }
 
 fn placement(matrix: Option<&[f32; 16]>, p: Point) -> Point {
@@ -51,6 +53,7 @@ struct StockPart<'mesh, 'a> {
     buffers: &'mesh [VData],
     bindings: &'a [Option<TextureBinding>],
     transform: Option<&'mesh [f32; 16]>,
+    hidden_node: Option<usize>,
 }
 
 fn record_part<'a>(
@@ -96,6 +99,7 @@ fn record_part<'a>(
                 base,
                 camo,
                 texture: binding,
+                hidden_node: part.hidden_node,
             });
         }
     }
@@ -105,6 +109,7 @@ fn record_part<'a>(
 fn stock_faces<'a>(
     vehicle: &InstalledVehicle,
     materials: &'a ModelMaterials,
+    default_hidden: &[String],
 ) -> Result<StockIndex<'a>> {
     let bytes = wt_unpack::vehicle::map(&vehicle.pack)
         .with_context(|| format!("Opening game model {}", vehicle.pack.display()))?;
@@ -129,6 +134,11 @@ fn stock_faces<'a>(
         .first()
         .context("The game model has no geometry")?;
     let mut faces = StockIndex::new();
+    let hidden_node = |name: &str| {
+        default_hidden
+            .iter()
+            .position(|hidden| hidden.eq_ignore_ascii_case(name))
+    };
     let mut rigid_buffers = vec![None; model.vdata.len()];
     for rigid in &lod.rigids {
         let transform = rig
@@ -142,6 +152,7 @@ fn stock_faces<'a>(
                 buffers: &model.vdata,
                 bindings: &materials.rigid,
                 transform,
+                hidden_node: hidden_node(&rigid.node),
             },
             &mut rigid_buffers,
             &mut faces,
@@ -157,6 +168,7 @@ fn stock_faces<'a>(
                 buffers: &model.skin_vdata,
                 bindings: &materials.skin,
                 transform: None,
+                hidden_node: hidden_node(&skin.node),
             },
             &mut skin_buffers,
             &mut faces,
@@ -170,13 +182,20 @@ fn stock_faces<'a>(
 struct Hit<'a> {
     camo: Option<TriangleUv>,
     texture: Option<&'a TextureBinding>,
+    hidden_node: Option<usize>,
 }
 
-fn match_face<'a>(index: &StockIndex<'a>, face: &Face, basis: Basis) -> Option<Hit<'a>> {
+fn match_face<'a>(
+    index: &StockIndex<'a>,
+    face: &Face,
+    basis: Basis,
+) -> Option<(Hit<'a>, FaceVisibility)> {
     let xyz = face.positions.map(|p| basis.transform(p));
     let [cx, cy, cz] = cell(&xyz);
     let mut best = None;
     let mut best_error = f32::INFINITY;
+    let mut has_hidden = false;
+    let mut has_visible = false;
     for x in cx - 1..=cx + 1 {
         for y in cy - 1..=cy + 1 {
             for z in cz - 1..=cz + 1 {
@@ -201,11 +220,17 @@ fn match_face<'a>(index: &StockIndex<'a>, face: &Face, basis: Basis) -> Option<H
                             score += position.iter().map(|v| v * v).sum::<f32>()
                                 + 64.0 * uv.iter().map(|v| v * v).sum::<f32>();
                         }
+                        if !score.is_finite() {
+                            continue;
+                        }
+                        has_hidden |= stock.hidden_node.is_some();
+                        has_visible |= stock.hidden_node.is_none();
                         if score < best_error {
                             best_error = score;
                             best = Some(Hit {
                                 camo: stock.camo.map(|uv| order.map(|i| uv[i])),
                                 texture: stock.texture,
+                                hidden_node: stock.hidden_node,
                             });
                         }
                     }
@@ -213,7 +238,15 @@ fn match_face<'a>(index: &StockIndex<'a>, face: &Face, basis: Basis) -> Option<H
             }
         }
     }
-    best
+    best.map(|hit| {
+        let visibility = if has_hidden && has_visible {
+            FaceVisibility::Ambiguous
+        } else {
+            hit.hidden_node
+                .map_or(FaceVisibility::Other, FaceVisibility::Hidden)
+        };
+        (hit, visibility)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -273,19 +306,28 @@ fn fit_basis(scene: &Scene, stock: &StockIndex<'_>) -> Basis {
     best
 }
 
+pub(crate) struct Attachment {
+    pub matched: usize,
+    pub skin: SkinProfile,
+    pub visibility: Vec<FaceVisibility>,
+}
+
 pub(crate) fn attach(
     scene: &mut Scene,
     vehicle: &InstalledVehicle,
     materials: &ModelMaterials,
-) -> Result<(usize, SkinProfile)> {
-    let index = stock_faces(vehicle, materials)?;
+    default_hidden: &[String],
+) -> Result<Attachment> {
+    let index = stock_faces(vehicle, materials, default_hidden)?;
     let basis = fit_basis(scene, &index);
     let legacy = Vehicle::from_unit(&vehicle.id);
     let candidates = materials.candidates();
     let mut votes = vec![BTreeMap::<String, usize>::new(); scene.slots.len()];
     let mut matched = 0;
-    for face in &mut scene.faces {
-        if let Some(hit) = match_face(&index, face, basis) {
+    let mut visibility = vec![FaceVisibility::Other; scene.faces.len()];
+    for (face, state) in scene.faces.iter_mut().zip(&mut visibility) {
+        if let Some((hit, classified)) = match_face(&index, face, basis) {
+            *state = classified;
             matched += 1;
             if let Some(binding) = hit.texture {
                 *votes[face.slot].entry(binding.color.clone()).or_default() += 1;
@@ -332,5 +374,72 @@ pub(crate) fn attach(
         candidates,
     };
     profile.validate()?;
-    Ok((matched, profile))
+    Ok(Attachment {
+        matched,
+        skin: profile,
+        visibility,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_coincident_visible_panels_when_their_original_uv_matches() {
+        let xyz = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let hidden_uv = [[0.1, 0.1], [0.3, 0.1], [0.1, 0.3]];
+        let visible_uv = [[0.5, 0.5], [0.7, 0.5], [0.5, 0.7]];
+        let mut index = StockIndex::from([(
+            cell(&xyz),
+            vec![
+                StockFace {
+                    xyz,
+                    base: hidden_uv,
+                    camo: None,
+                    texture: None,
+                    hidden_node: Some(0),
+                },
+                StockFace {
+                    xyz,
+                    base: visible_uv,
+                    camo: None,
+                    texture: None,
+                    hidden_node: None,
+                },
+            ],
+        )]);
+        let basis = Basis {
+            axes: [0, 1, 2],
+            signs: [1.0; 3],
+        };
+        let mut face = Face {
+            object: 0,
+            polygon: 0,
+            corners: [0, 1, 2],
+            vertices: [0, 1, 2],
+            slot: 0,
+            positions: xyz,
+            original: hidden_uv,
+            paint: [[0.0; 2]; 3],
+            tile: 1001,
+            camo: None,
+        };
+        assert_eq!(
+            match_face(&index, &face, basis).unwrap().1,
+            FaceVisibility::Hidden(0)
+        );
+        face.original = visible_uv;
+        assert_eq!(
+            match_face(&index, &face, basis).unwrap().1,
+            FaceVisibility::Other
+        );
+
+        face.original = hidden_uv;
+        index.get_mut(&cell(&xyz)).unwrap()[1].base = hidden_uv;
+        assert_eq!(
+            match_face(&index, &face, basis).unwrap().1,
+            FaceVisibility::Ambiguous
+        );
+    }
 }

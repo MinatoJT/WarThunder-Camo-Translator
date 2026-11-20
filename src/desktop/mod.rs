@@ -5,6 +5,7 @@ mod job;
 mod theme;
 mod vehicle_cache;
 mod vehicle_picker;
+mod visibility_review;
 
 use anyhow::Result;
 use defaults::Defaults;
@@ -22,6 +23,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use visibility_review::VisibilityReview;
 
 const TITLE: &str = "Camo Translator";
 
@@ -120,7 +122,8 @@ struct Running {
     tab: Tab,
     events: Receiver<Event>,
     steps: VecDeque<String>,
-    warnings: Vec<String>,
+    notes: Vec<String>,
+    review: Option<VisibilityReview>,
     started: Instant,
     closing: bool,
 }
@@ -130,11 +133,12 @@ enum Notice {
         tab: Tab,
         folder: PathBuf,
         open_error: Option<String>,
-        warnings: Vec<String>,
+        notes: Vec<String>,
     },
     Error {
         text: String,
     },
+    Cancelled,
 }
 
 struct Desktop {
@@ -177,20 +181,29 @@ impl Desktop {
                         running.steps.pop_front();
                     }
                 }
-                Ok(Event::Warning(warning)) => running.warnings.push(warning),
+                Ok(Event::Note(note)) => running.notes.push(note),
+                Ok(Event::ReviewHiddenFaces { report, reply }) => {
+                    let review = VisibilityReview::new(report, reply);
+                    if running.closing {
+                        review.cancel();
+                    } else {
+                        running.review = Some(review);
+                    }
+                }
                 Ok(Event::Finished(result)) => {
                     if running.tab == Tab::Prepare
-                        && let Ok(folder) = &result
+                        && let Ok(Some(folder)) = &result
                     {
                         self.export.use_project(folder);
                     }
                     self.notice = Some(match result {
-                        Ok(folder) => Notice::Complete {
+                        Ok(Some(folder)) => Notice::Complete {
                             tab: running.tab,
                             folder,
                             open_error: None,
-                            warnings: std::mem::take(&mut running.warnings),
+                            notes: std::mem::take(&mut running.notes),
                         },
+                        Ok(None) => Notice::Cancelled,
                         Err(error) => Notice::Error {
                             text: format!("{error:#}"),
                         },
@@ -225,7 +238,8 @@ impl Desktop {
                     tab: self.tab,
                     events,
                     steps: VecDeque::from(["正在启动任务".into()]),
-                    warnings: Vec::new(),
+                    notes: Vec::new(),
+                    review: None,
                     started: Instant::now(),
                     closing: false,
                 });
@@ -431,7 +445,7 @@ impl Desktop {
                         tab,
                         folder,
                         open_error,
-                        warnings,
+                        notes,
                     } => {
                         let ready = match tab {
                             Tab::Prepare => "Painter 项目已生成",
@@ -443,9 +457,9 @@ impl Desktop {
                                 .wrap()
                                 .selectable(true),
                         );
-                        for warning in warnings {
+                        for note in notes {
                             ui.add(
-                                egui::Label::new(theme::note(warning).color(theme::TEXT))
+                                egui::Label::new(theme::note(note).color(theme::TEXT))
                                     .wrap()
                                     .selectable(true),
                             );
@@ -462,6 +476,9 @@ impl Desktop {
                                 .selectable(true),
                         );
                     }
+                    Notice::Cancelled => {
+                        ui.label(theme::note("已取消生成 Painter 模型"));
+                    }
                 }
             }
         });
@@ -475,11 +492,20 @@ impl eframe::App for Desktop {
             && ctx.input(|i| i.viewport().close_requested())
         {
             running.closing = true;
+            if let Some(review) = running.review.take() {
+                review.cancel();
+            }
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
         }
         self.nav(ctx);
         self.footer(ctx);
         self.work_area(ctx, frame);
+        if let Some(running) = &mut self.running
+            && let Some(review) = &mut running.review
+            && review.show(ctx)
+        {
+            running.review = None;
+        }
     }
 }
 

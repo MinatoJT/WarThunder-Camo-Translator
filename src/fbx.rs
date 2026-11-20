@@ -9,7 +9,7 @@ const FILE_HEADER_LEN: usize = 27;
 const MARKER: &str = "CamoTranslatorMesh";
 const LABEL_SEPARATOR: &str = "\0\u{1}";
 
-pub fn restore_mesh_names(input: &Path, output: &Path, meshes: &[Object]) -> Result<()> {
+pub fn restore_mesh_names(input: &Path, output: &Path, meshes: &[&Object]) -> Result<()> {
     let bytes = fs::read(input)?;
     ensure!(bytes.starts_with(MAGIC), "Expected a binary Cinema 4D FBX");
     let version = read_word(
@@ -53,7 +53,7 @@ struct Rename<'a> {
     bytes: &'a [u8],
     output: Vec<u8>,
     word: usize,
-    meshes: &'a [Object],
+    meshes: &'a [&'a Object],
     restored: BTreeSet<usize>,
 }
 
@@ -247,7 +247,7 @@ mod tests {
             point_count: 40,
             polygon_count: 1,
         };
-        restore_mesh_names(&input, &output, &[object]).unwrap();
+        restore_mesh_names(&input, &output, &[&object]).unwrap();
 
         let patched = std::fs::read(output).unwrap();
         fn vertex_property(bytes: &[u8]) -> &[u8] {

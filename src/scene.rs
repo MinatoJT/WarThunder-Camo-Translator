@@ -1,5 +1,6 @@
 use crate::materials::{SkinProfile, TextureBinding};
 use crate::vehicle::Vehicle;
+use crate::visibility::VisibilityReport;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -81,6 +82,8 @@ pub struct PrepareReport<'a> {
     pub texture_candidates: Vec<TextureBinding>,
     pub objects: &'a [Object],
     pub slots: Vec<SlotInfo<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_faces: Option<&'a VisibilityReport>,
 }
 
 pub fn tile_offset(tile: u16) -> Uv {
@@ -242,6 +245,7 @@ impl Project {
             texture_candidates: profile.candidates.clone(),
             objects: &self.scene.objects,
             slots,
+            hidden_faces: None,
         })
     }
 }

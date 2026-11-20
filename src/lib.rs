@@ -54,3 +54,4 @@ fn publish_output(stage: TempDir, target: &Path) -> Result<()> {
 
 mod obj;
 pub mod vehicle;
+pub mod visibility;

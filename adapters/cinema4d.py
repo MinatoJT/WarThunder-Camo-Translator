@@ -65,6 +65,41 @@ def snapshot(doc, destination):
         json.dump(dict(slots=slots, objects=info, faces=faces), output, ensure_ascii=False, separators=(",", ":"))
 
 
+def remove_mesh_keep_children(obj):
+    if obj.GetDown() is not None:
+        parent = c4d.BaseObject(c4d.Onull)
+        parent.SetName(obj.GetName())
+        parent.InsertBefore(obj)
+        parent.SetMg(obj.GetMg())
+        while obj.GetDown() is not None:
+            child = obj.GetDown()
+            transform = child.GetMg()
+            child.Remove()
+            child.InsertUnderLast(parent)
+            child.SetMg(transform)
+    obj.Remove()
+
+
+def remove_polygons(doc, obj, kept):
+    count = obj.GetPolygonCount()
+    if len(kept) == count:
+        return
+    obj.GetPolygonH().DeselectAll()
+    selection = obj.GetPolygonS()
+    selection.DeselectAll()
+    for polygon in range(count):
+        if polygon not in kept:
+            selection.Select(polygon)
+    result = c4d.utils.SendModelingCommand(
+        command=c4d.MCOMMAND_DELETE,
+        list=[obj],
+        mode=c4d.MODELINGCOMMANDMODE_POLYGONSELECTION,
+        doc=doc,
+    )
+    if not result or obj.GetPolygonCount() != len(kept):
+        raise RuntimeError(f"Cinema 4D could not remove the scanned polygons from {obj.GetName()}")
+
+
 def export_fbx(doc, destination, project_path):
     with project_path.open(encoding="utf-8") as source:
         scene = json.load(source)["scene"]
@@ -72,9 +107,9 @@ def export_fbx(doc, destination, project_path):
     if len(meshes) != len(scene["objects"]):
         raise ValueError("The source scene changed while preparing the project")
 
-    layout = {}
+    layouts = [{} for _ in meshes]
     for face in scene["faces"]:
-        group = layout.setdefault((face["object"], face["polygon"]), [None] * 4)
+        group = layouts[face["object"]].setdefault(face["polygon"], [None] * 4)
         i = face["tile"] - 1001
         for corner, (u, v) in zip(face["corners"], face["paint"]):
             offset = (u + i % 10, 1.0 - v - i // 10)
@@ -82,18 +117,24 @@ def export_fbx(doc, destination, project_path):
                 raise ValueError("A quad needs to be triangulated in the source before unstacking its overlapping UVs")
             group[corner] = offset
 
+    marker = 0
     for index, (obj, path) in enumerate(meshes):
         expected = scene["objects"][index]
         if (list(path), obj.GetPointCount(), obj.GetPolygonCount()) != (
                 expected["path"], expected["point_count"], expected["polygon_count"]):
             raise ValueError(f"The source mesh changed at {'/'.join(path)}")
+        layout = layouts[index]
+        if not layout:
+            remove_mesh_keep_children(obj)
+            continue
         uvw = get_uvw(obj, path)
-        for polygon in range(obj.GetPolygonCount()):
-            uv = layout[(index, polygon)]
+        for polygon, uv in layout.items():
             if uv[3] is None:
                 uv[3] = uv[2]
             uvw.SetSlow(polygon, *(c4d.Vector(u, v, 0) for u, v in uv))
-        obj.SetName(f"CamoTranslatorMesh{index}")
+        remove_polygons(doc, obj, layout)
+        obj.SetName(f"CamoTranslatorMesh{marker}")
+        marker += 1
         obj.Message(c4d.MSG_UPDATE)
 
     plugin = c4d.plugins.FindPlugin(c4d.FORMAT_FBX_EXPORT, c4d.PLUGINTYPE_SCENESAVER)

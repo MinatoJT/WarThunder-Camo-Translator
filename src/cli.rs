@@ -1,7 +1,8 @@
 use crate::{
-    bake::{self, Alpha, ExportOptions},
+    bake::{self, Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions},
     catalog::Catalog,
-    prepare,
+    prepare::{self, PrepareRequest},
+    visibility::HiddenFaces,
 };
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -44,6 +45,9 @@ enum Commands {
         c4dpy: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
+        /// Keep or remove faces confirmed hidden in the game's default configuration.
+        #[arg(long, value_enum, default_value = "keep")]
+        hidden_faces: HiddenFaces,
     },
     /// Reproject Painter PNGs into the game's DDS textures.
     Export {
@@ -65,6 +69,9 @@ enum Commands {
         /// Size of the camouflage sheet. Defaults to --size.
         #[arg(long)]
         camo_size: Option<u32>,
+        /// Game camouflage scale percentage, using the game's 20–200% steps.
+        #[arg(long = "camo-scale", default_value_t = DEFAULT_CAMO_SCALE_PERCENT)]
+        camo_scale_percent: u16,
         /// Read Metallic, Roughness and Normal PNGs and export packed _n textures.
         #[arg(long)]
         material: bool,
@@ -94,10 +101,43 @@ pub fn run() -> Result<()> {
             vehicle,
             c4dpy,
             out,
+            hidden_faces,
         } => {
             ensure!(!name.trim().is_empty(), "The project name is empty");
-            prepare::prepare(name, &scene, &game_root, &vehicle, c4dpy.as_deref(), &out)
-                .context("Preparing a Camo Translator project")
+            let catalog = Catalog::scan(&game_root)?;
+            let vehicle = catalog.vehicle(&vehicle)?;
+            let target = prepare::prepare_with_review(
+                PrepareRequest {
+                    name,
+                    source: &scene,
+                    game_root: &game_root,
+                    vehicle,
+                    c4dpy: c4dpy.as_deref(),
+                    out: &out,
+                },
+                |step| eprintln!("{step}"),
+                |report| {
+                    for group in &report.groups {
+                        eprintln!(
+                            "{} · {} · {} · {} removable · U {:.4}–{:.4}, V {:.4}–{:.4}",
+                            group.game_node,
+                            group.object.join(" / "),
+                            group.texture_set,
+                            group.removable_triangles,
+                            group.uv_min[0],
+                            group.uv_max[0],
+                            group.uv_min[1],
+                            group.uv_max[1],
+                        );
+                    }
+                    Ok(Some(hidden_faces))
+                },
+            )
+            .context("Preparing a Camo Translator project")?;
+            if let Some(target) = target {
+                println!("{}", target.display());
+            }
+            Ok(())
         }
         Commands::Export {
             project,
@@ -107,6 +147,7 @@ pub fn run() -> Result<()> {
             bindings,
             size,
             camo_size,
+            camo_scale_percent,
             material,
             alpha,
         } => {
@@ -122,6 +163,7 @@ pub fn run() -> Result<()> {
             let options = ExportOptions {
                 size,
                 camo_size: camo_size.unwrap_or(size),
+                camo_scale_percent,
                 material,
                 alpha,
                 slots,

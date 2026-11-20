@@ -13,6 +13,11 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+pub const CAMO_SCALE_PERCENTS: [u16; 21] = [
+    20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
+];
+pub const DEFAULT_CAMO_SCALE_PERCENT: u16 = 200;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Alpha {
@@ -25,6 +30,7 @@ pub enum Alpha {
 pub struct ExportOptions {
     pub size: u32,
     pub camo_size: u32,
+    pub camo_scale_percent: u16,
     pub material: bool,
     pub alpha: Alpha,
     pub slots: Vec<String>,
@@ -49,6 +55,8 @@ struct BaseReport {
 struct Report {
     base_size: u32,
     camo_size: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camo_scale_percent: Option<u16>,
     alpha: Alpha,
     skin_config: Option<String>,
     camo_pixels: usize,
@@ -298,6 +306,7 @@ impl Base {
 
 struct Camo {
     size: u32,
+    uv_scale: f32,
     color: Vec<u8>,
     order: Vec<u8>,
     depth: Vec<f32>,
@@ -305,10 +314,11 @@ struct Camo {
 }
 
 impl Camo {
-    fn new(size: u32) -> Self {
+    fn new(size: u32, scale_percent: u16) -> Self {
         let count = (size as usize).pow(2);
         Self {
             size,
+            uv_scale: f32::from(DEFAULT_CAMO_SCALE_PERCENT) / f32::from(scale_percent),
             color: [57, 61, 71, 255].repeat(count),
             order: vec![0; count],
             depth: vec![f32::NEG_INFINITY; count],
@@ -330,6 +340,12 @@ impl Camo {
                 continue;
             }
             let Some(uv2) = face.camo else { continue };
+            // Stored UV2 matches 200%. The game scales around the center of the tile.
+            let uv2 = if self.uv_scale == 1.0 {
+                uv2
+            } else {
+                uv2.map(|uv| uv.map(|axis| (axis - 0.5) * self.uv_scale + 0.5))
+            };
             let map = &textures[&face.tile].base;
             triangle(uv2, self.size, |i, weights| {
                 let original = interpolate(face.original, weights);
@@ -365,14 +381,29 @@ fn save(path: PathBuf, size: u32, colors: &[u8]) -> Result<()> {
         .with_context(|| format!("Writing {}", path.display()))
 }
 
+fn blk_scale(percent: u16) -> f32 {
+    // The game truncates the signed slider index. Bias interior steps away
+    // from zero so that values like 1.30 still land on their intended step.
+    let bias = match percent {
+        20 | 100 | 200 => 0.0,
+        ..100 => -0.000_001,
+        _ => 0.000_001,
+    };
+    f32::from(percent) / 100.0 + bias
+}
+
 fn write_skin_config(
     folder: &Path,
     unit: &str,
     slots: &[BaseReport],
     patterns: &[(String, String)],
+    camo_scale_percent: u16,
 ) -> Result<String> {
     let name = format!("{unit}.blk");
     let mut config = String::from("name:t=\"user\"\n");
+    if !patterns.is_empty() {
+        writeln!(config, "scale:r={:.6}", blk_scale(camo_scale_percent))?;
+    }
     for (source, output) in patterns {
         writeln!(
             config,
@@ -489,6 +520,10 @@ pub fn export_with_progress(
     options: &ExportOptions,
     mut progress: impl FnMut(Progress<'_>),
 ) -> Result<PathBuf> {
+    ensure!(
+        CAMO_SCALE_PERCENTS.contains(&options.camo_scale_percent),
+        "Choose a game camouflage scale from {CAMO_SCALE_PERCENTS:?} percent"
+    );
     for size in [options.size, options.camo_size] {
         ensure!(
             (128..=8192).contains(&size) && size.is_power_of_two(),
@@ -612,7 +647,7 @@ pub fn export_with_progress(
         {
             let camo = camos
                 .entry(pattern.clone())
-                .or_insert_with(|| Camo::new(options.camo_size));
+                .or_insert_with(|| Camo::new(options.camo_size, options.camo_scale_percent));
             for (indices, textures) in camo_sources {
                 camo.paint(&base, faces, &indices, &textures, &reused);
             }
@@ -679,6 +714,7 @@ pub fn export_with_progress(
             &profile.unit,
             &base_reports,
             &patterns,
+            options.camo_scale_percent,
         )?)
     } else {
         None
@@ -689,6 +725,7 @@ pub fn export_with_progress(
     let report = Report {
         base_size: options.size,
         camo_size: options.camo_size,
+        camo_scale_percent: (!patterns.is_empty()).then_some(options.camo_scale_percent),
         alpha: options.alpha,
         skin_config,
         camo_pixels,
@@ -704,6 +741,21 @@ pub fn export_with_progress(
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[test]
+    fn blk_scale_round_trips_through_the_game_slider() {
+        for percent in CAMO_SCALE_PERCENTS {
+            let value = blk_scale(percent);
+            assert!((0.2..=2.0).contains(&value));
+            let slider = if value < 1.0 {
+                (value - 1.0) / (1.0 - 0.2) * 10.0
+            } else {
+                (value - 1.0) * 10.0
+            } as i32;
+            let display = 100 + slider * if slider < 0 { 8 } else { 10 };
+            assert_eq!(display, i32::from(percent), "BLK scale {value}");
+        }
+    }
 
     #[test]
     fn reads_painter_prefixed_png_with_original_casing() {
