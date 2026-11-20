@@ -45,10 +45,41 @@ fn two_real_models_from_a_user_selected_game_root() {
             .arg(&folder));
         assert!(folder.join(mesh).is_file());
 
-        let project = Project::load(&folder).unwrap();
+        let mut project = Project::load(&folder).unwrap();
         compare_mesh_names(&source, &folder.join(mesh), &project);
-        assert!(camo_translator::atlas::first_overlap(&project.scene.faces).is_none());
         let slot = project.scene.slots.iter().position(|s| s == body).unwrap();
+        assert!(
+            project
+                .scene
+                .faces
+                .iter()
+                .filter(|face| face.slot == slot)
+                .all(|face| face.tile == 1001 || uv_area(face.original) <= 1e-12)
+        );
+
+        // Mark a copy of the body objects to exercise the selective export with real game UV2.
+        for face in project.scene.faces.iter().filter(|face| face.slot == slot) {
+            let object = &mut project.scene.objects[face.object];
+            if !object.is_reused() {
+                object.path.insert(0, "Reused".into());
+            }
+        }
+        let reused: Vec<_> = project
+            .scene
+            .objects
+            .iter()
+            .map(|object| object.is_reused())
+            .collect();
+        camo_translator::atlas::unwrap(
+            &mut project.scene.faces,
+            project.scene.slots.len(),
+            &reused,
+        )
+        .unwrap();
+        assert!(
+            camo_translator::atlas::first_reused_overlap(&project.scene.faces, &reused).is_none()
+        );
+        camo_translator::scene::write_json(&folder.join("project.json"), &project, false).unwrap();
         let faces: Vec<_> = project
             .scene
             .faces
@@ -146,6 +177,11 @@ fn two_real_models_from_a_user_selected_game_root() {
             "{key}: {mapped} Body face matches, {separated} shared UV triangles with different camo colors"
         );
     }
+}
+
+fn uv_area(uv: TriangleUv) -> f64 {
+    let [a, b, c] = uv.map(|corner| corner.map(f64::from));
+    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
 }
 
 fn local_path(name: &str) -> PathBuf {

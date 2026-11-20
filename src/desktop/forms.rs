@@ -338,7 +338,8 @@ impl ExportForm {
         }
 
         ui.add_space(11.0);
-        detail(ui, "_c.dds + camo.dds", "颜色回写到原 UV 和游戏迷彩 UV2");
+        detail(ui, "_c.dds", "颜色回写到原 UV");
+        detail(ui, "Reused 对象", "标记区域使用游戏 UV2 的迷彩图和单独底图");
         if self.alpha == Alpha::FixedWhite {
             detail(ui, ".blk", "与 DDS 一起放入游戏的 UserSkins 子目录");
         }
@@ -474,7 +475,7 @@ fn vehicle_name(vehicle: Vehicle) -> &'static str {
 
 fn alpha_name(alpha: Alpha) -> &'static str {
     match alpha {
-        Alpha::CamoWhite => "复用区域为白（仅 DDS）",
+        Alpha::CamoWhite => "Reused 遮罩为白（仅 DDS）",
         Alpha::FixedWhite => "固定层为白（DDS 和 BLK）",
     }
 }

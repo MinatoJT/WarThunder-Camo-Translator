@@ -35,6 +35,14 @@ pub struct Object {
     pub polygon_count: usize,
 }
 
+impl Object {
+    pub fn is_reused(&self) -> bool {
+        self.path
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Reused"))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Scene {
     pub slots: Vec<String>,
@@ -56,6 +64,7 @@ pub struct SlotInfo<'a> {
     pub game_texture: Option<&'static str>,
     pub triangles: usize,
     pub matched_uv2: usize,
+    pub reused_triangles: usize,
     pub tiles: BTreeSet<u16>,
 }
 
@@ -173,6 +182,7 @@ impl Project {
                     .and_then(|vehicle| vehicle.game_texture(name)),
                 triangles: 0,
                 matched_uv2: 0,
+                reused_triangles: 0,
                 tiles: BTreeSet::new(),
             })
             .collect();
@@ -180,6 +190,7 @@ impl Project {
             let slot = &mut slots[face.slot];
             slot.triangles += 1;
             slot.matched_uv2 += usize::from(face.camo.is_some());
+            slot.reused_triangles += usize::from(self.scene.objects[face.object].is_reused());
             slot.tiles.insert(face.tile);
         }
         PrepareReport {

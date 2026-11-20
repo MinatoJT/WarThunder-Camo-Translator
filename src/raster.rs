@@ -66,3 +66,59 @@ pub fn texel([u, v]: Uv, size: u32) -> usize {
     let axis = |value: f32| ((value.rem_euclid(1.0) * size as f32) as u32).min(size - 1);
     (axis(1.0 - v) * size + axis(u)) as usize
 }
+
+/// Extend a texture past its rasterized islands without overwriting any covered texels.
+pub fn pad_edges(size: u32, coverage: &mut [u8], mut copy_pixel: impl FnMut(usize, usize)) {
+    let stride = size as usize;
+    let count = coverage.len();
+    let neighbors = |index: usize| {
+        let x = index % stride;
+        [
+            if x == 0 {
+                index + stride - 1
+            } else {
+                index - 1
+            },
+            if x + 1 == stride {
+                index + 1 - stride
+            } else {
+                index + 1
+            },
+            if index < stride {
+                index + count - stride
+            } else {
+                index - stride
+            },
+            if index + stride >= count {
+                index + stride - count
+            } else {
+                index + stride
+            },
+        ]
+    };
+    let mut frontier: Vec<_> = coverage
+        .iter()
+        .enumerate()
+        .filter(|&(index, &value)| {
+            value != 0 && neighbors(index).iter().any(|&near| coverage[near] == 0)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let mut next = Vec::new();
+    for _ in 0..(size / 512).clamp(2, 16) {
+        if frontier.is_empty() {
+            break;
+        }
+        next.clear();
+        for source in frontier.drain(..) {
+            for target in neighbors(source) {
+                if coverage[target] == 0 {
+                    coverage[target] = coverage[source];
+                    copy_pixel(target, source);
+                    next.push(target);
+                }
+            }
+        }
+        std::mem::swap(&mut frontier, &mut next);
+    }
+}

@@ -1,6 +1,6 @@
 use crate::dds::{material_pixel, write_rgba};
 use crate::progress::Progress;
-use crate::raster::{interpolate, texel, triangle};
+use crate::raster::{interpolate, pad_edges, texel, triangle};
 use crate::scene::{Face, Project, Uv, write_json};
 use crate::vehicle::Vehicle;
 use anyhow::{Context, Result, ensure};
@@ -35,9 +35,11 @@ struct BaseReport {
     slot: String,
     file: String,
     material_file: Option<String>,
+    camo_base_file: Option<String>,
     covered_pixels: usize,
     pixels_routed_to_camo: usize,
-    shared_pixels_missing_uv2: usize,
+    reused_pixels_missing_uv2: usize,
+    reused_pixels_sharing_unmarked_uv: usize,
 }
 
 #[derive(Serialize)]
@@ -189,14 +191,13 @@ fn sample<const C: usize>(image: &RgbaImage, [u, v]: Uv) -> [u8; C] {
     })
 }
 
-const ONE_SURFACE: u8 = 0;
-const SHARED: u8 = 1;
-const MISSING_UV2: u8 = 2;
+const FIXED: u8 = 1;
+const REUSED: u8 = 2;
+const MISSING_UV2: u8 = 4;
 
 struct Base {
     size: u32,
-    owner: Vec<u32>,
-    route: Vec<u8>,
+    coverage: Vec<u8>,
     color: Vec<u8>,
     material: Option<Vec<u8>>,
 }
@@ -206,8 +207,7 @@ impl Base {
         let count = (size as usize).pow(2);
         Self {
             size,
-            owner: vec![0; count],
-            route: vec![ONE_SURFACE; count],
+            coverage: vec![0; count],
             color: vec![0; count * 4],
             material: material.then(|| [255, 128, 0, 128].repeat(count)),
         }
@@ -218,47 +218,73 @@ impl Base {
         faces: &[Face],
         indices: &[usize],
         textures: &BTreeMap<u16, Tile>,
+        reused: &[bool],
         alpha: Alpha,
     ) {
         for &index in indices {
             let face = &faces[index];
             let texture = &textures[&face.tile];
+            let coverage = if reused[face.object] {
+                REUSED | if face.camo.is_none() { MISSING_UV2 } else { 0 }
+            } else {
+                FIXED
+            };
             triangle(face.original, self.size, |i, weights| {
-                if self.owner[i] == 0 {
-                    self.owner[i] = (index + 1) as u32;
+                let previous = self.coverage[i];
+                self.coverage[i] |= coverage;
+                // A game texture has a single mask at this UV. Keep the ordinary
+                // surface's color and material if a Reused face also covers it.
+                if previous == 0 || (coverage == FIXED && previous & FIXED == 0) {
                     let uv = interpolate(face.paint, weights);
                     self.color[i * 4..i * 4 + 3].copy_from_slice(&sample::<3>(&texture.base, uv));
                     if let Some(buffer) = &mut self.material {
                         let packed = texture.packed(uv).expect("material maps were loaded");
                         buffer[i * 4..i * 4 + 4].copy_from_slice(&packed);
                     }
-                    return;
-                }
-
-                let other = &faces[self.owner[i] as usize - 1];
-                if face.object == other.object
-                    && face.polygon == other.polygon
-                    && face
-                        .corners
-                        .iter()
-                        .all(|corner| other.corners.contains(corner))
-                {
-                    return;
-                }
-                if face.camo.is_none() || other.camo.is_none() {
-                    self.route[i] = MISSING_UV2;
-                } else if self.route[i] != MISSING_UV2 {
-                    self.route[i] = SHARED;
                 }
             });
         }
 
-        for (i, pixel) in self.color.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (pixel, &coverage) in self
+            .color
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&self.coverage)
+        {
             let white = match alpha {
-                Alpha::CamoWhite => self.route[i] == SHARED,
-                Alpha::FixedWhite => self.owner[i] != 0 && self.route[i] != SHARED,
+                Alpha::CamoWhite => coverage == REUSED,
+                Alpha::FixedWhite => coverage != 0 && coverage != REUSED,
             };
             pixel[3] = if white { 255 } else { 0 };
+        }
+    }
+
+    fn pad(&mut self) {
+        let colors = self.color.as_chunks_mut::<4>().0;
+        let mut material = self
+            .material
+            .as_mut()
+            .map(|pixels| pixels.as_chunks_mut::<4>().0);
+        pad_edges(self.size, &mut self.coverage, |target, source| {
+            colors[target] = colors[source];
+            if let Some(pixels) = &mut material {
+                pixels[target] = pixels[source];
+            }
+        });
+    }
+
+    fn apply_camo_backing(&mut self) {
+        // Leave the backing enabled across the padded UV islands. Only the fixed
+        // overlay changes alpha at the boundary between fixed color and camo.
+        for (pixel, &coverage) in self
+            .color
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&self.coverage)
+        {
+            pixel[3] = if coverage != 0 { 255 } else { 0 };
         }
     }
 }
@@ -289,14 +315,18 @@ impl Camo {
         faces: &[Face],
         indices: &[usize],
         textures: &BTreeMap<u16, Tile>,
+        reused: &[bool],
     ) {
         for &index in indices {
             let face = &faces[index];
+            if !reused[face.object] {
+                continue;
+            }
             let Some(uv2) = face.camo else { continue };
             let map = &textures[&face.tile].base;
             triangle(uv2, self.size, |i, weights| {
                 let original = interpolate(face.original, weights);
-                let shared = base.route[texel(original, base.size)] == SHARED;
+                let shared = base.coverage[texel(original, base.size)] == REUSED;
                 let order = 1 + u8::from(shared);
                 if order < self.order[i] {
                     return;
@@ -332,11 +362,16 @@ fn write_skin_config(
     folder: &Path,
     vehicle: Vehicle,
     slots: &[BaseReport],
+    has_camo: bool,
 ) -> Result<&'static str> {
     let (name, camouflage) = vehicle.skin_config();
-    let mut config = format!(
-        "name:t=\"user\"\n\nreplace_tex{{\n  from:t=\"{camouflage}*\"\n  to:t=\"camo.dds\"\n}}\n"
-    );
+    let mut config = String::from("name:t=\"user\"\n");
+    if has_camo {
+        writeln!(
+            config,
+            "\nreplace_tex{{\n  from:t=\"{camouflage}*\"\n  to:t=\"camo.dds\"\n}}"
+        )?;
+    }
     for slot in slots {
         let color_file = &slot.file;
         let color = color_file
@@ -346,13 +381,24 @@ fn write_skin_config(
             config,
             "\nset_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{color_file}\"\n  param:t=\"camo_skin_tex\"\n}}"
         )?;
+        if let Some(backing) = &slot.camo_base_file {
+            writeln!(
+                config,
+                "\nreplace_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{backing}\"\n  param:t=\"camo_skin_tex\"\n}}"
+            )?;
+        }
         if let Some(normal_file) = &slot.material_file {
             let normal = normal_file
                 .strip_suffix(".dds")
                 .context("Missing .dds extension")?;
+            let param = if slot.camo_base_file.is_some() {
+                "\n  param:t=\"camo_skin_tex\""
+            } else {
+                ""
+            };
             writeln!(
                 config,
-                "\nreplace_tex{{\n  from:t=\"{normal}*\"\n  to:t=\"{normal_file}\"\n}}"
+                "\nreplace_tex{{\n  from:t=\"{normal}*\"\n  to:t=\"{normal_file}\"{param}\n}}"
             )?;
         }
     }
@@ -430,7 +476,13 @@ pub fn export_with_progress(
     let vehicle = Vehicle::from_model(&project.model).context("Unsupported vehicle")?;
     let faces = &project.scene.faces;
     let pngs = PainterPngs::read(painter_pngs)?;
-    let mut camo = Camo::new(options.camo_size);
+    let reused: Vec<_> = project
+        .scene
+        .objects
+        .iter()
+        .map(|object| object.is_reused())
+        .collect();
+    let mut camo = None;
     let mut base_reports = Vec::new();
 
     for (slot, name, stem) in selected(&project.scene.slots, &options.slots, vehicle)? {
@@ -454,8 +506,39 @@ pub fn export_with_progress(
         });
 
         let mut base = Base::new(options.size, options.material);
-        base.paint(faces, &indices, &textures, options.alpha);
-        camo.paint(&base, faces, &indices, &textures);
+        base.paint(faces, &indices, &textures, &reused, options.alpha);
+        let active = base
+            .coverage
+            .iter()
+            .filter(|&&coverage| coverage == REUSED)
+            .count();
+        let mixed = base
+            .coverage
+            .iter()
+            .filter(|&&coverage| coverage & (FIXED | REUSED) == (FIXED | REUSED))
+            .count();
+        let missing = base
+            .coverage
+            .iter()
+            .filter(|&&coverage| coverage & MISSING_UV2 != 0)
+            .count();
+        if mixed != 0 || missing != 0 {
+            progress(Progress::ReusedUvWarning {
+                slot: name,
+                mixed,
+                missing,
+            });
+        }
+        if active != 0 {
+            camo.get_or_insert_with(|| Camo::new(options.camo_size))
+                .paint(&base, faces, &indices, &textures, &reused);
+        }
+        let covered_pixels = base
+            .coverage
+            .iter()
+            .filter(|&&coverage| coverage != 0)
+            .count();
+        base.pad();
         let color_name = format!("{stem}_c.dds");
         save(stage.path().join(&color_name), base.size, &base.color)?;
         let material_name = if let Some(data) = &base.material {
@@ -465,30 +548,61 @@ pub fn export_with_progress(
         } else {
             None
         };
+        let camo_base_file = if active != 0 && options.alpha == Alpha::FixedWhite {
+            let name = format!("{stem}_camo_base.dds");
+            base.apply_camo_backing();
+            save(stage.path().join(&name), base.size, &base.color)?;
+            Some(name)
+        } else {
+            None
+        };
         base_reports.push(BaseReport {
             slot: name.to_owned(),
             file: color_name,
             material_file: material_name,
-            covered_pixels: base.owner.iter().filter(|&&i| i != 0).count(),
-            pixels_routed_to_camo: base.route.iter().filter(|&&r| r == SHARED).count(),
-            shared_pixels_missing_uv2: base.route.iter().filter(|&&r| r == MISSING_UV2).count(),
+            camo_base_file,
+            covered_pixels,
+            pixels_routed_to_camo: active,
+            reused_pixels_missing_uv2: missing,
+            reused_pixels_sharing_unmarked_uv: mixed,
         });
     }
 
     progress(Progress::WriteCamouflage);
-    save(stage.path().join("camo.dds"), camo.size, &camo.color)?;
+    let camo_pixels = if let Some(camo) = &mut camo {
+        let painted = camo.order.iter().filter(|&&value| value != 0).count();
+        let pixels = camo.color.as_chunks_mut::<4>().0;
+        pad_edges(camo.size, &mut camo.order, |target, source| {
+            pixels[target] = pixels[source]
+        });
+        save(stage.path().join("camo.dds"), camo.size, &camo.color)?;
+        painted
+    } else {
+        0
+    };
     let skin_config = if options.alpha == Alpha::FixedWhite {
-        Some(write_skin_config(stage.path(), vehicle, &base_reports)?)
+        Some(write_skin_config(
+            stage.path(),
+            vehicle,
+            &base_reports,
+            camo.is_some(),
+        )?)
     } else {
         None
     };
+    let conflicts = camo.as_ref().map_or(0, |camo| {
+        camo.conflicts.iter().filter(|&&conflict| conflict).count()
+    });
+    if conflicts != 0 {
+        progress(Progress::CamoUvConflict(conflicts));
+    }
     let report = Report {
         base_size: options.size,
         camo_size: options.camo_size,
         alpha: options.alpha,
         skin_config,
-        camo_pixels: camo.order.iter().filter(|&&v| v != 0).count(),
-        camo_shared_color_conflicts: camo.conflicts.iter().filter(|&&v| v).count(),
+        camo_pixels,
+        camo_shared_color_conflicts: conflicts,
         slots: base_reports,
     };
     write_json(&stage.path().join("export-report.json"), &report, true)?;

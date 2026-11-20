@@ -148,11 +148,16 @@ pub fn prepare_with_progress(
     });
 
     progress(Progress::SeparateUvIslands);
-    atlas::unwrap(&mut scene.faces, scene.slots.len())?;
+    let reused: Vec<_> = scene
+        .objects
+        .iter()
+        .map(|object| object.is_reused())
+        .collect();
+    atlas::unwrap(&mut scene.faces, scene.slots.len(), &reused)?;
     scene.validate(true)?;
     ensure!(
-        atlas::first_overlap(&scene.faces).is_none(),
-        "The generated Painter layout contains an overlap"
+        atlas::first_reused_overlap(&scene.faces, &reused).is_none(),
+        "The generated Painter layout has a UV overlap involving Reused"
     );
 
     let project = Project {

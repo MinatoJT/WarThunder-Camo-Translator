@@ -1,6 +1,6 @@
 use crate::scene::{Face, TriangleUv, Uv};
 use anyhow::{Result, ensure};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const PADDING: f32 = 0.002;
 const AREA_EPSILON: f64 = 1e-12;
@@ -210,45 +210,54 @@ impl Tiles {
     }
 }
 
-pub fn unwrap(faces: &mut [Face], slot_count: usize) -> Result<()> {
+pub fn unwrap(faces: &mut [Face], slot_count: usize, reused: &[bool]) -> Result<()> {
     let by_slot = charts(faces, slot_count);
     let mut seen = vec![0; faces.len()];
     for charts_in_slot in by_slot {
-        let mut native = Grid::default();
+        let mut ordinary = Vec::new();
         let mut moved = Vec::new();
         let mut degenerate = Vec::new();
 
         for chart in charts_in_slot {
+            let separate = reused[faces[chart[0]].object];
             let mut local = Grid::default();
             let mut connected = Vec::with_capacity(chart.len());
             for index in chart {
                 let uv = faces[index].original;
                 if side(uv[0], uv[1], uv[2]).abs() <= AREA_EPSILON {
                     degenerate.push(index);
-                } else if local.hits(faces, index, &mut seen, index * 2 + 1) {
+                } else if !separate {
+                    ordinary.push(index);
+                } else if local.hits(faces, index, &mut seen, index + 1) {
                     moved.push(Chart::new(faces, vec![index]));
                 } else {
                     local.add(faces, index);
                     connected.push(index);
                 }
             }
-            if connected.is_empty() {
-                continue;
+            if !connected.is_empty() {
+                moved.push(Chart::new(faces, connected));
             }
-            let chart = Chart::new(faces, connected);
-            if chart.bounds.native()
-                && !chart
-                    .faces
-                    .iter()
-                    .any(|&id| native.hits(faces, id, &mut seen, id * 2 + 2))
-            {
-                for index in chart.faces {
-                    faces[index].paint = faces[index].original;
-                    faces[index].tile = 1001;
-                    native.add(faces, index);
-                }
-            } else {
-                moved.push(chart);
+        }
+
+        if !ordinary.is_empty() {
+            // A common transform preserves any intentional overlap between ordinary islands.
+            let bounds = Bounds::points(ordinary.iter().flat_map(|&i| faces[i].original));
+            let [w, h] = bounds.size();
+            let scale = 1.0f32.min((1.0 - 2.0 * PADDING) / w.max(h));
+            for index in ordinary {
+                let face = &mut faces[index];
+                face.tile = 1001;
+                face.paint = if bounds.native() {
+                    face.original
+                } else {
+                    face.original.map(|[u, v]| {
+                        [
+                            (u - bounds.min[0]) * scale + PADDING,
+                            (v - bounds.min[1]) * scale + PADDING,
+                        ]
+                    })
+                };
             }
         }
 
@@ -284,15 +293,25 @@ pub fn unwrap(faces: &mut [Face], slot_count: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn first_overlap(faces: &[Face]) -> Option<(usize, usize, u16)> {
+pub fn first_reused_overlap(faces: &[Face], reused: &[bool]) -> Option<(usize, usize, u16)> {
+    let marked_tiles: BTreeSet<_> = faces
+        .iter()
+        .filter(|face| reused[face.object])
+        .map(|face| (face.slot, face.tile))
+        .collect();
     let mut grids = HashMap::<(usize, u16), Grid>::new();
     let mut seen = vec![0; faces.len()];
     for (index, face) in faces.iter().enumerate() {
-        let grid = grids.entry((face.slot, face.tile)).or_default();
+        let tile = (face.slot, face.tile);
+        if !marked_tiles.contains(&tile) {
+            continue;
+        }
+        let grid = grids.entry(tile).or_default();
         for cell in Bounds::points(face.paint).cells() {
             let entries = grid.bins.entry(cell).or_default();
             for &other in entries.iter() {
-                if seen[other] != index + 1 {
+                if (reused[face.object] || reused[faces[other].object]) && seen[other] != index + 1
+                {
                     seen[other] = index + 1;
                     if overlaps(&face.paint, &faces[other].paint) {
                         return Some((index, other, face.tile));

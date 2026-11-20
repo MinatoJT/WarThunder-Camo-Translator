@@ -10,6 +10,8 @@ Camo Translator 0.1 是 Windows 上的 Rust 桌面工具，支持豹 2A8 和 90B
 
 ## 准备 Painter 模型
 
+在源模型里，把需要独立绘制并交给游戏迷彩图的面放入名为 `Reused` 的网格对象或组，保留它们的原 UV 和材质槽。例如把裙板需要单独画的外表面放入 `Reused`，让烟雾弹等部件继续共用 UV。工具准备 Painter 网格时只为 `Reused` 拆开重叠，普通部件保留共用关系。
+
 用 `cargo build --release --locked` 构建。命令行请使用 `target\release\camo-translator-cli.exe`。从工具目录执行下列命令，把路径换成自己的。选择包含 `content` 目录的 War Thunder 安装根目录。
 
 ```powershell
@@ -53,9 +55,9 @@ $game = 'D:\Games\War Thunder'
 
 - 默认回写所有能对应游戏贴图的材质槽。可重复传入 `--slot` 只导出其中几个。90B OBJ 里的 Body 槽叫 `Body_1`。
 - 加 `--material` 才读取后三张图并输出 `_n.dds`。通道固定为 R = 255 − Roughness、G = Normal.G、B = Metallic、A = Normal.R。
-- 默认 `--alpha fixed-white` 使用游戏 `set_tex` 的透明度规则，固定颜色 Alpha 为白，交给 `camo.dds` 的复用区域为黑。随 DDS 生成 `germ_leopard_2a8.blk` 或 `jp_type_90b.blk`。已有自定义配置时可用 `--alpha camo-white` 导出复用区域为白的 DDS。
-- DDS 是 RGBA 8.8.8.8，单层，无 mipmap。`--camo-size` 可以单独指定迷彩图尺寸。输出目录每次用新名字。
-- `export-report.json` 记录送入迷彩的复用像素、缺 UV2 的复用像素及 UV2 上出现多种颜色的像素。发生 UV2 冲突时优先保留需要区分的颜色，其次取靠外的面。分离的玻璃槽可在 Painter 使用，豹 2A8 的玻璃替换规则留待后续版本。
+- 默认生成车型对应的 `.blk`。需要 Camo 的材质槽包含固定覆盖图 `_c.dds` 和游戏底图 `_camo_base.dds`。`_c.dds` 的 Alpha 决定固定色和迷彩的交界。`_camo_base.dds` 在 UV 岛和扩边内的 Alpha 统一为 255，让游戏对交界采样时底层保持连续。没有可用的 `Reused` 时导出固定贴图。已有自定义配置时可用 `--alpha camo-white` 导出白色的 Reused 遮罩。
+- DDS 是 RGBA 8.8.8.8，单层，无 mipmap。导出时会给 UV 岛留出边缘像素，供游戏过滤采样。`--camo-size` 可以单独指定迷彩图尺寸。输出目录每次用新名字。
+- `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。分离的玻璃槽可在 Painter 使用，豹 2A8 的玻璃替换规则留待后续版本。
 
 ## 验收
 

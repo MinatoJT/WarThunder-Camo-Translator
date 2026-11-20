@@ -22,17 +22,16 @@ fn face(object: usize, slot: usize) -> Face {
 }
 
 #[test]
-fn duplicate_color_uvs_are_separated_per_slot() {
+fn normal_objects_keep_intentionally_overlapping_uvs() {
     let mut faces = [face(0, 0), face(1, 0), face(2, 1)];
-    unwrap(&mut faces, 2).unwrap();
+    unwrap(&mut faces, 2, &[false; 3]).unwrap();
     assert_eq!(
         [faces[0].tile, faces[1].tile, faces[2].tile],
-        [1001, 1002, 1001]
+        [1001, 1001, 1001]
     );
-    assert_eq!(faces[0].paint, faces[0].original);
-    assert_eq!(faces[2].paint, faces[2].original);
-    assert!((faces[1].paint[1][0] - faces[1].paint[0][0] - 0.3).abs() < 1e-6);
-    assert!((faces[1].paint[2][1] - faces[1].paint[0][1] - 0.3).abs() < 1e-6);
+    for face in &faces {
+        assert_eq!(face.paint, face.original);
+    }
 }
 
 #[test]
@@ -66,70 +65,140 @@ fn pixel(file: &std::path::Path, x: u32, y: u32) -> [u8; 4] {
 }
 
 #[test]
-fn left_and_right_can_export_different_colors_from_one_original_uv() {
+fn only_reused_faces_are_isolated_in_painter() {
+    let mut faces = [face(0, 0), face(1, 0), face(2, 0), face(3, 0)];
+    let reused = [false, false, true, true];
+    unwrap(&mut faces, 1, &reused).unwrap();
+    assert_eq!(faces[0].paint, faces[1].paint);
+    assert_eq!(faces[0].tile, 1001);
+    assert_eq!(faces[1].tile, 1001);
+    assert!(faces[2].tile > 1001 && faces[3].tile > 1001);
+    assert!(camo_translator::atlas::first_reused_overlap(&faces, &reused).is_none());
+}
+
+#[test]
+fn reuse_is_manual_and_packed_material_covers_both_layers() {
     use camo_translator::bake::{Alpha, ExportOptions, export};
     use camo_translator::scene::{Object, Project, SCHEMA, Scene, write_json};
     use image::{Rgba, RgbaImage};
 
     let folder = tempfile::tempdir().unwrap();
     let base = folder.path();
-    let mut faces = vec![face(0, 0), face(1, 0)];
-    // Separate objects can carry distinct geometry even if their coordinates coincide.
-    faces[1].positions = faces[0].positions;
+    let mut faces = vec![face(0, 0), face(1, 0), face(2, 0)];
+    // A wheel has the same UV2 as the first skirt and an independent original UV.
     faces[0].camo = Some(faces[0].original);
     faces[1].camo = Some(faces[1].original.map(|[u, v]| [u + 0.5, v]));
-    unwrap(&mut faces, 1).unwrap();
-    let project = Project {
+    faces[2].camo = faces[0].camo;
+    faces[2].original = faces[2].original.map(|[u, v]| [u + 0.5, v]);
+    for (face, tile) in faces.iter_mut().zip([1002, 1003, 1001]) {
+        face.paint = face.original;
+        face.tile = tile;
+    }
+    let mut project = Project {
         version: SCHEMA,
-        name: "Two side skirts".into(),
+        name: "Two side skirts and a wheel".into(),
         model: "leopard_2a8".into(),
         scene: Scene {
             slots: vec!["Body".into()],
-            objects: ["Left", "Right"]
-                .map(|name| Object {
-                    path: vec![name.into()],
-                    point_count: 3,
-                    polygon_count: 1,
-                })
-                .into(),
+            objects: [
+                vec!["Reused".into(), "Left".into()],
+                vec!["Reused".into(), "Right".into()],
+                vec!["Wheel".into()],
+            ]
+            .map(|path| Object {
+                path,
+                point_count: 3,
+                polygon_count: 1,
+            })
+            .into(),
             faces,
         },
     };
-    write_json(&base.join("project.json"), &project, false).unwrap();
-    for (tile, color) in [(1001, [220, 22, 32, 255]), (1002, [31, 84, 226, 255])] {
-        RgbaImage::from_pixel(4, 4, Rgba(color))
-            .save(base.join(format!("Body_BaseColor.{tile}.png")))
-            .unwrap();
+    let project_file = base.join("project.json");
+    write_json(&project_file, &project, false).unwrap();
+    let red = [220, 22, 32, 255];
+    let blue = [31, 84, 226, 255];
+    let wheel = [60, 60, 60, 255];
+    for (tile, color) in [(1001, wheel), (1002, red), (1003, blue)] {
+        for (channel, value) in [
+            ("BaseColor", color),
+            ("Metallic", [127, 127, 127, 255]),
+            ("Normal", [127, 127, 255, 255]),
+            ("Roughness", [127, 127, 127, 255]),
+        ] {
+            RgbaImage::from_pixel(4, 4, Rgba(value))
+                .save(base.join(format!("Body_{channel}.{tile}.png")))
+                .unwrap();
+        }
     }
+    let mut options = ExportOptions {
+        size: 128,
+        camo_size: 128,
+        material: true,
+        alpha: Alpha::FixedWhite,
+        slots: vec!["Body".into()],
+    };
 
     for (alpha, expected) in [(Alpha::CamoWhite, 255), (Alpha::FixedWhite, 0)] {
+        options.alpha = alpha;
         let out = base.join(format!("out-{expected}"));
-        let options = ExportOptions {
-            size: 128,
-            camo_size: 128,
-            material: false,
-            alpha,
-            slots: vec!["Body".into()],
-        };
         export(base, base, &out, &options).unwrap();
-        assert_eq!(
-            pixel(&out.join("leopard_2a8_body_c.dds"), 20, 96),
-            [220, 22, 32, expected]
-        );
-        assert_eq!(pixel(&out.join("camo.dds"), 20, 96), [220, 22, 32, 255]);
-        assert_eq!(pixel(&out.join("camo.dds"), 84, 96), [31, 84, 226, 255]);
+        let fixed = out.join("leopard_2a8_body_c.dds");
+        let camo = out.join("camo.dds");
+        let normal = out.join("leopard_2a8_body_n.dds");
+        assert_eq!(pixel(&fixed, 20, 96), [220, 22, 32, expected]);
+        assert_eq!(pixel(&fixed, 84, 96), [60, 60, 60, 255 - expected]);
+        assert_eq!(pixel(&camo, 20, 96), red);
+        assert_eq!(pixel(&camo, 84, 96), blue);
+        assert_eq!(pixel(&normal, 20, 96), [128, 127, 127, 127]);
+        assert_eq!(pixel(&normal, 84, 96), [128, 127, 127, 127]);
+
         let config = out.join("germ_leopard_2a8.blk");
         if alpha == Alpha::FixedWhite {
+            let backing = out.join("leopard_2a8_body_camo_base.dds");
+            assert_eq!(pixel(&backing, 20, 96), red);
+            assert_eq!(pixel(&backing, 12, 96), red);
+            assert_eq!(pixel(&fixed, 12, 96), [220, 22, 32, 0]);
+            assert_eq!(pixel(&camo, 12, 96), red);
+            assert_eq!(pixel(&normal, 12, 96), [128, 127, 127, 127]);
+            // Fixed overlays remain opaque over a continuous backing layer.
+            assert_eq!(pixel(&backing, 84, 96), wheel);
+            assert_eq!(pixel(&backing, 76, 96), wheel);
+            assert_eq!(pixel(&backing, 64, 20), [0, 0, 0, 0]);
             let text = std::fs::read_to_string(config).unwrap();
-            assert!(text.starts_with("name:t=\"user\""));
             assert!(text.contains("from:t=\"ger_camo_bronzegruen*\"\n  to:t=\"camo.dds\""));
             assert!(text.contains(
-                "set_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_c.dds\"\n  param:t=\"camo_skin_tex\""
+                "set_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_c.dds\""
             ));
-            assert!(!text.contains("_n.dds"));
+            assert!(text.contains("replace_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_camo_base.dds\""));
+            assert!(text.contains(
+                "replace_tex{\n  from:t=\"leopard_2a8_body_n*\"\n  to:t=\"leopard_2a8_body_n.dds\""
+            ));
         } else {
             assert!(!config.exists());
         }
         assert!(export(base, base, &out, &options).is_err());
     }
+
+    // A texture has one alpha value per original UV. An unmarked face sharing it
+    // keeps its fixed color, and the collision is reported.
+    project.scene.objects[1].path = vec!["Ordinary skirt".into()];
+    write_json(&project_file, &project, false).unwrap();
+    let out = base.join("mixed");
+    export(base, base, &out, &options).unwrap();
+    assert_eq!(pixel(&out.join("leopard_2a8_body_c.dds"), 20, 96), blue);
+    assert!(!out.join("camo.dds").exists());
+    assert!(
+        !std::fs::read_to_string(out.join("germ_leopard_2a8.blk"))
+            .unwrap()
+            .contains("camo.dds")
+    );
+    let report: serde_json::Value =
+        camo_translator::scene::read_json(&out.join("export-report.json")).unwrap();
+    assert!(
+        report["slots"][0]["reused_pixels_sharing_unmarked_uv"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }

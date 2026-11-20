@@ -118,6 +118,7 @@ struct Running {
     tab: Tab,
     events: Receiver<Event>,
     steps: VecDeque<String>,
+    warnings: Vec<String>,
     started: Instant,
     closing: bool,
 }
@@ -127,6 +128,7 @@ enum Notice {
         tab: Tab,
         folder: PathBuf,
         open_error: Option<String>,
+        warnings: Vec<String>,
     },
     Error {
         text: String,
@@ -171,12 +173,14 @@ impl Desktop {
                         running.steps.pop_front();
                     }
                 }
+                Ok(Event::Warning(warning)) => running.warnings.push(warning),
                 Ok(Event::Finished(result)) => {
                     self.notice = Some(match result {
                         Ok(folder) => Notice::Complete {
                             tab: running.tab,
                             folder,
                             open_error: None,
+                            warnings: std::mem::take(&mut running.warnings),
                         },
                         Err(error) => Notice::Error {
                             text: format!("{error:#}"),
@@ -212,6 +216,7 @@ impl Desktop {
                     tab: self.tab,
                     events,
                     steps: VecDeque::from(["正在启动任务".into()]),
+                    warnings: Vec::new(),
                     started: Instant::now(),
                     closing: false,
                 });
@@ -305,6 +310,7 @@ impl Desktop {
                         tab,
                         folder,
                         open_error,
+                        ..
                     }) = &mut self.notice
                     {
                         if ui.button("打开输出目录").clicked() {
@@ -355,7 +361,7 @@ impl Desktop {
                                         Tab::Prepare => {
                                             ui.label(theme::title("准备 Painter 模型"));
                                             ui.label(theme::note(
-                                                "分离复用 UV，保留对象名称和材质槽。",
+                                                "保留普通共用 UV，为 Reused 对象安排独立 UV。",
                                             ));
                                             ui.add_space(10.0);
                                             self.prepare.show(ui, native);
@@ -417,6 +423,7 @@ impl Desktop {
                         tab,
                         folder,
                         open_error,
+                        warnings,
                     } => {
                         let ready = match tab {
                             Tab::Prepare => "Painter 项目已生成",
@@ -428,6 +435,13 @@ impl Desktop {
                                 .wrap()
                                 .selectable(true),
                         );
+                        for warning in warnings {
+                            ui.add(
+                                egui::Label::new(theme::note(warning).color(theme::ERROR))
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                        }
                         if let Some(error) = open_error {
                             ui.label(theme::note(error).color(theme::ERROR));
                         }

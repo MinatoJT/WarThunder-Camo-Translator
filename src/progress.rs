@@ -5,12 +5,27 @@ use std::path::Path;
 pub enum Progress<'a> {
     ReadMesh,
     MatchCamouflage(&'a Path),
-    FaceMatches { matched: usize, total: usize },
+    FaceMatches {
+        matched: usize,
+        total: usize,
+    },
     SeparateUvIslands,
     WritePainterMesh,
     ReadProject,
-    ReadTextures { slot: &'a str, tiles: usize },
-    ReprojectTextures { slot: &'a str, tiles: usize },
+    ReadTextures {
+        slot: &'a str,
+        tiles: usize,
+    },
+    ReprojectTextures {
+        slot: &'a str,
+        tiles: usize,
+    },
+    ReusedUvWarning {
+        slot: &'a str,
+        mixed: usize,
+        missing: usize,
+    },
+    CamoUvConflict(usize),
     WriteCamouflage,
 }
 
@@ -24,7 +39,7 @@ impl fmt::Display for Progress<'_> {
             Self::FaceMatches { matched, total } => {
                 write!(f, "Matched {matched} of {total} overall faces")
             }
-            Self::SeparateUvIslands => f.write_str("Separating overlapping UV islands"),
+            Self::SeparateUvIslands => f.write_str("Arranging Reused UVs for independent painting"),
             Self::WritePainterMesh => f.write_str("Exporting the Painter mesh"),
             Self::ReadProject => f.write_str("Reading project"),
             Self::ReadTextures { slot, tiles } => {
@@ -33,7 +48,19 @@ impl fmt::Display for Progress<'_> {
             Self::ReprojectTextures { slot, tiles } => {
                 write!(f, "Reprojecting {slot} from {tiles} Painter tiles")
             }
-            Self::WriteCamouflage => f.write_str("Writing camouflage and export files"),
+            Self::ReusedUvWarning {
+                slot,
+                mixed,
+                missing,
+            } => write!(
+                f,
+                "{slot}: {mixed} Reused texels also cover ordinary objects; {missing} lack UV2"
+            ),
+            Self::CamoUvConflict(pixels) => write!(
+                f,
+                "{pixels} camouflage texels received different Reused colors"
+            ),
+            Self::WriteCamouflage => f.write_str("Writing skin files and export report"),
         }
     }
 }
