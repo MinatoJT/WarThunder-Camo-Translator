@@ -1,0 +1,11 @@
+/.dev/
+/target/
+/projects/
+/preview/
+*.c4d
+*.fbx
+*.dds
+*.grp
+*.spp
+*.uvpack
+__pycache__/
