@@ -28,6 +28,14 @@ impl Vehicle {
             .find(|car| car.model() == name)
     }
 
+    pub(crate) fn from_unit(id: &str) -> Option<Self> {
+        match id {
+            "germ_leopard_2a8" => Some(Self::Leopard2a8),
+            "jp_type_90b" => Some(Self::Type90b),
+            _ => None,
+        }
+    }
+
     pub fn pack(self, root: &Path) -> Result<PathBuf> {
         let name = match self {
             Self::Leopard2a8 => "germ_leopard_2a8.grp",

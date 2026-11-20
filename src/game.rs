@@ -1,15 +1,13 @@
+use crate::catalog::InstalledVehicle;
+use crate::materials::{ModelMaterials, SkinProfile, TextureBinding, choose_binding};
 use crate::scene::{Face, Point, Scene, TriangleUv};
 use crate::vehicle::Vehicle;
 use anyhow::{Context, Result, ensure};
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-use wt_formats::dynmodel::DynModel;
+use std::collections::{BTreeMap, HashMap};
+use wt_formats::dynmodel::{DynModel, Elem, VData, Vertex};
 use wt_formats::geom_node_tree::GeomNodeTree;
-use wt_formats::grp::GrpPack;
+use wt_formats::grp::{GrpPack, class_id};
 
-const DYNA_MODEL: u32 = 0xb4b7d9c4;
-const SKELETON: u32 = 0x56f81b6d;
 const CELL_M: f32 = 0.002;
 const POSITION_TOLERANCE_M: f32 = 0.001;
 const UV_TOLERANCE: f32 = 0.00042;
@@ -22,10 +20,11 @@ const ORDERS: [[usize; 3]; 6] = [
     [2, 1, 0],
 ];
 
-struct StockFace {
+struct StockFace<'a> {
     xyz: [Point; 3],
     base: TriangleUv,
-    camo: TriangleUv,
+    camo: Option<TriangleUv>,
+    texture: Option<&'a TextureBinding>,
 }
 
 fn placement(matrix: Option<&[f32; 16]>, p: Point) -> Point {
@@ -45,76 +44,135 @@ fn cell(points: &[Point; 3]) -> [i32; 3] {
     })
 }
 
-type StockIndex = HashMap<[i32; 3], Vec<StockFace>>;
+type StockIndex<'a> = HashMap<[i32; 3], Vec<StockFace<'a>>>;
 
-fn stock_faces(path: &Path, model_name: &str) -> Result<StockIndex> {
-    let bytes = fs::read(path).with_context(|| format!("Opening game model {}", path.display()))?;
+struct StockPart<'mesh, 'a> {
+    elems: &'mesh [Elem],
+    buffers: &'mesh [VData],
+    bindings: &'a [Option<TextureBinding>],
+    transform: Option<&'mesh [f32; 16]>,
+}
+
+fn record_part<'a>(
+    model: &DynModel,
+    part: StockPart<'_, 'a>,
+    decoded_buffers: &mut [Option<Vec<Vertex>>],
+    faces: &mut StockIndex<'a>,
+) -> Result<()> {
+    for group in part.elems {
+        let vertices = part
+            .buffers
+            .get(group.vdata)
+            .context("Missing vertex buffer")?;
+        let binding = part.bindings.get(group.material).and_then(Option::as_ref);
+        let end = group.first_index + group.triangles * 3;
+        let indices = vertices
+            .indices
+            .get(group.first_index..end)
+            .context("Invalid game draw range")?;
+        let decoded = &mut decoded_buffers[group.vdata];
+        if decoded.is_none() {
+            *decoded = Some(
+                (0..vertices.vertex_count())
+                    .map(|i| model.vertex(vertices, i))
+                    .collect::<wt_formats::Result<Vec<_>>>()?,
+            );
+        }
+        let decoded = decoded.as_ref().unwrap();
+        for &[a, b, c] in indices.as_chunks::<3>().0 {
+            let [Some(a), Some(b), Some(c)] =
+                [a, b, c].map(|index| decoded.get(index as usize + group.base_vertex))
+            else {
+                anyhow::bail!("Game face has an invalid corner")
+            };
+            let corners = [a, b, c];
+            let xyz = corners.map(|v| placement(part.transform, v.pos));
+            let base = corners.map(|v| [v.uv[0], 1.0 - v.uv[1]]);
+            let camo = vertices
+                .has_uv1()
+                .then(|| corners.map(|v| [v.uv1[0], 1.0 - v.uv1[1]]));
+            faces.entry(cell(&xyz)).or_default().push(StockFace {
+                xyz,
+                base,
+                camo,
+                texture: binding,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn stock_faces<'a>(
+    vehicle: &InstalledVehicle,
+    materials: &'a ModelMaterials,
+) -> Result<StockIndex<'a>> {
+    let bytes = wt_unpack::vehicle::map(&vehicle.pack)
+        .with_context(|| format!("Opening game model {}", vehicle.pack.display()))?;
     let pack = GrpPack::parse(&bytes).context("Reading the game's GRP")?;
-    let resource = pack
-        .find(model_name, DYNA_MODEL)
-        .with_context(|| format!("{model_name} model missing from GRP"))?;
-    let rig_resource = pack
-        .find(&format!("{model_name}_skeleton"), SKELETON)
-        .context("Game model skeleton is missing")?;
-    let model = DynModel::parse(resource.data()).context("Reading the game mesh")?;
-    let rig = GeomNodeTree::parse(rig_resource.data()).context("Reading the game transforms")?;
+    let find = |name: &str, class| {
+        pack.resources
+            .iter()
+            .find(|resource| resource.class_id == class && resource.name.eq_ignore_ascii_case(name))
+    };
+    let model = find(&vehicle.model, class_id::DYN_MODEL)
+        .with_context(|| format!("{} model missing from GRP", vehicle.model))?;
+    let model = DynModel::parse(model.data()).context("Reading the game mesh")?;
+    let rig = find(
+        &format!("{}_skeleton", vehicle.model),
+        class_id::GEOM_NODE_TREE,
+    )
+    .map(|resource| GeomNodeTree::parse(resource.data()))
+    .transpose()
+    .context("Reading the game transforms")?;
     let lod = model
         .lods
         .first()
         .context("The game model has no geometry")?;
-    let decoded = model
-        .vdata
-        .iter()
-        .map(|buf| {
-            if buf.has_uv1() {
-                (0..buf.vertex_count())
-                    .map(|i| model.vertex(buf, i))
-                    .collect::<wt_formats::Result<Vec<_>>>()
-            } else {
-                Ok(Vec::new())
-            }
-        })
-        .collect::<wt_formats::Result<Vec<_>>>()?;
     let mut faces = StockIndex::new();
-    for mesh in &lod.rigids {
-        let wtm = rig.find(&mesh.node).map(|node| &node.wtm);
-        for group in &mesh.elems {
-            let verts = &decoded[group.vdata];
-            if verts.is_empty() {
-                continue;
-            }
-            let indices = &model.vdata[group.vdata].indices;
-            let end = group.first_index + group.triangles * 3;
-            for face in indices
-                .get(group.first_index..end)
-                .context("Invalid game draw range")?
-                .as_chunks::<3>()
-                .0
-            {
-                let corners =
-                    [face[0], face[1], face[2]].map(|i| verts.get(i as usize + group.base_vertex));
-                let [Some(a), Some(b), Some(c)] = corners else {
-                    anyhow::bail!("Game face has an invalid corner");
-                };
-                let corners = [a, b, c];
-                let xyz = corners.map(|v| placement(wtm, v.pos));
-                let base = corners.map(|v| [v.uv[0], 1.0 - v.uv[1]]);
-                let camo = corners.map(|v| [v.uv1[0], 1.0 - v.uv1[1]]);
-                faces
-                    .entry(cell(&xyz))
-                    .or_default()
-                    .push(StockFace { xyz, base, camo });
-            }
-        }
+    let mut rigid_buffers = vec![None; model.vdata.len()];
+    for rigid in &lod.rigids {
+        let transform = rig
+            .as_ref()
+            .and_then(|tree| tree.find(&rigid.node))
+            .map(|node| &node.wtm);
+        record_part(
+            &model,
+            StockPart {
+                elems: &rigid.elems,
+                buffers: &model.vdata,
+                bindings: &materials.rigid,
+                transform,
+            },
+            &mut rigid_buffers,
+            &mut faces,
+        )?;
     }
-    ensure!(
-        !faces.is_empty(),
-        "The game mesh has no original camouflage UVs"
-    );
+    let mut skin_buffers = vec![None; model.skin_vdata.len()];
+    for skin in &lod.skins {
+        // Skinned vertices are stored in model space in their bind pose.
+        record_part(
+            &model,
+            StockPart {
+                elems: &skin.elems,
+                buffers: &model.skin_vdata,
+                bindings: &materials.skin,
+                transform: None,
+            },
+            &mut skin_buffers,
+            &mut faces,
+        )?;
+    }
+    ensure!(!faces.is_empty(), "The game mesh has no triangles");
     Ok(faces)
 }
 
-fn match_face(index: &StockIndex, face: &Face, basis: Basis) -> Option<TriangleUv> {
+#[derive(Clone, Copy)]
+struct Hit<'a> {
+    camo: Option<TriangleUv>,
+    texture: Option<&'a TextureBinding>,
+}
+
+fn match_face<'a>(index: &StockIndex<'a>, face: &Face, basis: Basis) -> Option<Hit<'a>> {
     let xyz = face.positions.map(|p| basis.transform(p));
     let [cx, cy, cz] = cell(&xyz);
     let mut best = None;
@@ -145,7 +203,10 @@ fn match_face(index: &StockIndex, face: &Face, basis: Basis) -> Option<TriangleU
                         }
                         if score < best_error {
                             best_error = score;
-                            best = Some(order.map(|i| stock.camo[i]));
+                            best = Some(Hit {
+                                camo: stock.camo.map(|uv| order.map(|i| uv[i])),
+                                texture: stock.texture,
+                            });
                         }
                     }
                 }
@@ -157,57 +218,119 @@ fn match_face(index: &StockIndex, face: &Face, basis: Basis) -> Option<TriangleU
 
 #[derive(Clone, Copy)]
 struct Basis {
-    swap_xz: bool,
-    x_sign: f32,
-    z_sign: f32,
+    axes: [usize; 3],
+    signs: [f32; 3],
 }
 
 impl Basis {
-    fn transform(self, [x, y, z]: Point) -> Point {
-        let (x, z) = if self.swap_xz { (z, x) } else { (x, z) };
-        [x * self.x_sign, y, z * self.z_sign]
+    fn transform(self, p: Point) -> Point {
+        [0, 1, 2].map(|axis| p[self.axes[axis]] * self.signs[axis])
     }
 }
 
-fn fit_basis(scene: &Scene, stock: &StockIndex) -> Basis {
-    let bases = [false, true].into_iter().flat_map(|swap_xz| {
-        [1.0, -1.0].into_iter().flat_map(move |x_sign| {
-            [1.0, -1.0].into_iter().map(move |z_sign| Basis {
-                swap_xz,
-                x_sign,
-                z_sign,
-            })
-        })
-    });
-    let step = (scene.faces.len() / 1600).max(1);
-    bases
-        .enumerate()
-        .max_by_key(|(i, basis)| {
-            let hits = scene
+fn fit_basis(scene: &Scene, stock: &StockIndex<'_>) -> Basis {
+    let step = (scene.faces.len() / 1000).max(1);
+    let mut best = Basis {
+        axes: [0, 1, 2],
+        signs: [1.0; 3],
+    };
+    let mut hits = 0;
+    // Try Y-up first to retain the choices for existing OBJ and C4D scenes.
+    for axes in [
+        [0, 1, 2],
+        [2, 1, 0],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+    ] {
+        for signs in [
+            [1., 1., 1.],
+            [1., 1., -1.],
+            [-1., 1., 1.],
+            [-1., 1., -1.],
+            [1., -1., 1.],
+            [1., -1., -1.],
+            [-1., -1., 1.],
+            [-1., -1., -1.],
+        ] {
+            let basis = Basis { axes, signs };
+            let count = scene
                 .faces
                 .iter()
                 .step_by(step)
-                .filter(|face| match_face(stock, face, *basis).is_some())
+                .filter(|face| match_face(stock, face, basis).is_some())
                 .count();
-            (hits, std::cmp::Reverse(*i))
-        })
-        .expect("the axis candidates are fixed")
-        .1
+            if count > hits {
+                best = basis;
+                hits = count;
+                if hits >= scene.faces.len().div_ceil(step) * 95 / 100 {
+                    return best;
+                }
+            }
+        }
+    }
+    best
 }
 
-pub fn attach_uv2(scene: &mut Scene, grp: &Path, vehicle: Vehicle) -> Result<usize> {
-    let index = stock_faces(grp, vehicle.model())?;
+pub(crate) fn attach(
+    scene: &mut Scene,
+    vehicle: &InstalledVehicle,
+    materials: &ModelMaterials,
+) -> Result<(usize, SkinProfile)> {
+    let index = stock_faces(vehicle, materials)?;
     let basis = fit_basis(scene, &index);
-    let mut assigned = 0;
+    let legacy = Vehicle::from_unit(&vehicle.id);
+    let candidates = materials.candidates();
+    let mut votes = vec![BTreeMap::<String, usize>::new(); scene.slots.len()];
+    let mut matched = 0;
     for face in &mut scene.faces {
-        if vehicle.game_texture(&scene.slots[face.slot]).is_some() {
-            face.camo = match_face(&index, face, basis);
-            assigned += usize::from(face.camo.is_some());
+        if let Some(hit) = match_face(&index, face, basis) {
+            matched += 1;
+            if let Some(binding) = hit.texture {
+                *votes[face.slot].entry(binding.color.clone()).or_default() += 1;
+            }
+            let supports_camo = match legacy {
+                Some(vehicle) => vehicle.game_texture(&scene.slots[face.slot]).is_some(),
+                None => hit
+                    .texture
+                    .is_some_and(|binding| binding.camouflage.is_some()),
+            };
+            face.camo = hit.camo.filter(|uv| {
+                supports_camo
+                    && uv
+                        .iter()
+                        .flatten()
+                        .all(|v| v.is_finite() && v.abs() <= 16.0)
+            });
         }
     }
     ensure!(
-        assigned > 0,
-        "No editable face matched the game mesh. Check the selected model and original UVs."
+        matched > 0,
+        "No editable face matched the game mesh. Check the selected vehicle and original UVs."
     );
-    Ok(assigned)
+    let slots = scene
+        .slots
+        .iter()
+        .zip(&votes)
+        .filter_map(|(name, matches)| {
+            let legacy_color = legacy
+                .and_then(|vehicle| vehicle.game_texture(name))
+                .map(|stem| format!("{stem}_c"));
+            choose_binding(name, &candidates, matches, legacy_color.as_deref())
+                .map(|binding| (name.clone(), binding))
+        })
+        .collect();
+    ensure!(
+        !candidates.is_empty(),
+        "The game model has no paintable textures"
+    );
+    let profile = SkinProfile {
+        unit: vehicle.id.clone(),
+        name: vehicle.name.clone(),
+        slots,
+        candidates,
+    };
+    profile.validate()?;
+    Ok((matched, profile))
 }

@@ -98,6 +98,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
         version: SCHEMA,
         name: "Two side skirts and a wheel".into(),
         model: "leopard_2a8".into(),
+        skin: None,
         scene: Scene {
             slots: vec!["Body".into()],
             objects: [
@@ -137,6 +138,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
         material: true,
         alpha: Alpha::FixedWhite,
         slots: vec!["Body".into()],
+        bindings: Default::default(),
     };
 
     for (alpha, expected) in [(Alpha::CamoWhite, 255), (Alpha::FixedWhite, 0)] {
@@ -177,7 +179,14 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
         } else {
             assert!(!config.exists());
         }
-        assert!(export(base, base, &out, &options).is_err());
+        std::fs::write(out.join("notes.txt"), "artist notes").unwrap();
+        std::fs::write(&fixed, "previous export").unwrap();
+        export(base, base, &out, &options).unwrap();
+        assert_eq!(pixel(&fixed, 20, 96), [220, 22, 32, expected]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("notes.txt")).unwrap(),
+            "artist notes"
+        );
     }
 
     // A texture has one alpha value per original UV. An unmarked face sharing it
@@ -201,4 +210,79 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
             .unwrap()
             > 0
     );
+}
+
+#[test]
+fn newly_discovered_fixed_skin_writes_native_texture_names_and_preserves_alpha() {
+    use camo_translator::bake::{Alpha, ExportOptions, export};
+    use camo_translator::materials::{SkinProfile, TextureBinding};
+    use camo_translator::scene::{Object, Project, SCHEMA, Scene, write_json};
+    use image::{Rgba, RgbaImage};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path();
+    let mut other = face(0, 1);
+    other.original = other.original.map(|[u, v]| [u + 0.5, v]);
+    other.paint = other.original;
+    other.tile = 1001;
+    let mut face = face(0, 0);
+    face.paint = face.original;
+    face.camo = Some(face.original);
+    face.tile = 1001;
+    let candidate = TextureBinding {
+        color: "airframe_a".into(),
+        normal: None,
+        camouflage: None,
+        overlay: false,
+    };
+    let project = Project {
+        version: SCHEMA,
+        name: "Fixed skin".into(),
+        model: "game_aircraft_model".into(),
+        skin: Some(SkinProfile {
+            unit: "game-aircraft".into(),
+            name: "Aircraft".into(),
+            slots: Default::default(),
+            candidates: vec![candidate],
+        }),
+        scene: Scene {
+            slots: vec!["Renamed material".into(), "Second material".into()],
+            objects: vec![Object {
+                path: vec!["Reused".into()],
+                point_count: 3,
+                polygon_count: 1,
+            }],
+            faces: vec![face, other],
+        },
+    };
+    write_json(&input.join("project.json"), &project, false).unwrap();
+    let paint = [41, 85, 130, 96];
+    RgbaImage::from_pixel(8, 8, Rgba(paint))
+        .save(input.join("Painter_Renamed material_BaseColor.1001.png"))
+        .unwrap();
+    let other_paint = [128, 42, 65, 211];
+    RgbaImage::from_pixel(8, 8, Rgba(other_paint))
+        .save(input.join("Painter_Second material_BaseColor.1001.png"))
+        .unwrap();
+
+    let options = ExportOptions {
+        size: 128,
+        camo_size: 128,
+        material: true,
+        alpha: Alpha::FixedWhite,
+        slots: vec!["Renamed material".into(), "Second material".into()],
+        bindings: [
+            ("Renamed material".into(), "airframe_a".into()),
+            ("Second material".into(), "airframe_a".into()),
+        ]
+        .into(),
+    };
+    let out = input.join("skin");
+    export(input, input, &out, &options).unwrap();
+    assert_eq!(pixel(&out.join("airframe_a.dds"), 20, 96), paint);
+    assert_eq!(pixel(&out.join("airframe_a.dds"), 84, 96), other_paint);
+    assert!(!out.join("camo.dds").exists());
+    let cfg = std::fs::read_to_string(out.join("game-aircraft.blk")).unwrap();
+    assert!(cfg.contains("replace_tex{\n  from:t=\"airframe_a*\"\n  to:t=\"airframe_a.dds\""));
+    assert!(!cfg.contains("camo_skin_tex"));
 }

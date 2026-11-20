@@ -44,6 +44,11 @@ fn two_real_models_from_a_user_selected_game_root() {
             .arg("--out")
             .arg(&folder));
         assert!(folder.join(mesh).is_file());
+        assert!(
+            folder
+                .join(camo_translator::prepare::PAINTER_PNG_DIR)
+                .is_dir()
+        );
 
         let mut project = Project::load(&folder).unwrap();
         compare_mesh_names(&source, &folder.join(mesh), &project);

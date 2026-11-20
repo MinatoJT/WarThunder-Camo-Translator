@@ -1,13 +1,16 @@
 use crate::atlas;
+use crate::catalog::{Catalog, InstalledVehicle};
 use crate::game;
+use crate::materials::ModelMaterials;
 use crate::obj::Obj;
 use crate::progress::Progress;
 use crate::scene::{Project, SCHEMA, Scene, read_json, write_json};
-use crate::vehicle::Vehicle;
 use anyhow::{Context, Result, ensure};
 use std::fs;
 use std::path::{Path, PathBuf, absolute};
 use std::process::Command;
+
+pub const PAINTER_PNG_DIR: &str = "Painter PNG";
 
 const ADAPTER: &str = include_str!("../adapters/cinema4d.py");
 
@@ -107,10 +110,12 @@ pub fn prepare(
     name: String,
     source: &Path,
     game_root: &Path,
-    vehicle: Vehicle,
+    unit: &str,
     c4dpy: Option<&Path>,
     out: &Path,
 ) -> Result<()> {
+    let catalog = Catalog::scan(game_root)?;
+    let vehicle = catalog.vehicle(unit)?;
     let target = prepare_with_progress(name, source, game_root, vehicle, c4dpy, out, |step| {
         eprintln!("{step}");
     })?;
@@ -122,7 +127,7 @@ pub fn prepare_with_progress(
     name: String,
     source: &Path,
     game_root: &Path,
-    vehicle: Vehicle,
+    vehicle: &InstalledVehicle,
     c4dpy: Option<&Path>,
     out: &Path,
     mut progress: impl FnMut(Progress<'_>),
@@ -133,15 +138,15 @@ pub fn prepare_with_progress(
         "Source scene not found: {}",
         source.display()
     );
-    let grp = vehicle.pack(game_root)?;
     let (target, stage) = crate::new_output(out)?;
 
     progress(Progress::ReadMesh);
     let (mut scene, export_mesh) = open_source(&source, c4dpy, stage.path())?;
     scene.validate(false)?;
 
-    progress(Progress::MatchCamouflage(&grp));
-    let matched = game::attach_uv2(&mut scene, &grp, vehicle)?;
+    progress(Progress::MatchCamouflage(&vehicle.pack));
+    let materials = ModelMaterials::read(game_root, vehicle)?;
+    let (matched, skin) = game::attach(&mut scene, vehicle, &materials)?;
     progress(Progress::FaceMatches {
         matched,
         total: scene.faces.len(),
@@ -163,18 +168,20 @@ pub fn prepare_with_progress(
     let project = Project {
         version: SCHEMA,
         name,
-        model: vehicle.model().to_owned(),
+        model: vehicle.model.clone(),
+        skin: Some(skin),
         scene,
     };
     write_json(&stage.path().join("project.json"), &project, false)?;
     write_json(
         &stage.path().join("prepare-report.json"),
-        &project.report(),
+        &project.report()?,
         true,
     )?;
 
     progress(Progress::WritePainterMesh);
     export_mesh(stage.path(), &project)?;
+    fs::create_dir(stage.path().join(PAINTER_PNG_DIR))?;
     crate::publish_output(stage, &target)?;
     Ok(target)
 }

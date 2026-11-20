@@ -1,4 +1,4 @@
-use camo_translator::vehicle::Vehicle;
+use camo_translator::catalog::is_game_root;
 use std::ffi::OsString;
 use std::fs;
 use std::os::windows::ffi::OsStringExt;
@@ -14,11 +14,11 @@ const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 const STEAM: &str = r"SOFTWARE\Valve\Steam";
 const GAME_FOLDERS: [&str; 2] = ["War Thunder", "WarThunder"];
 
-pub(super) fn detect(vehicle: Vehicle) -> Option<PathBuf> {
+pub(super) fn detect() -> Option<PathBuf> {
     let mut registered = ["Steam App 236390", "War Thunder", "WarThunder"]
         .into_iter()
         .flat_map(|game| registry_paths(&format!(r"{UNINSTALL}\{game}"), "InstallLocation"));
-    if let Some(path) = registered.find(|path| vehicle.pack(path).is_ok()) {
+    if let Some(path) = registered.find(|path| is_game_root(path)) {
         return Some(path);
     }
 
@@ -30,16 +30,16 @@ pub(super) fn detect(vehicle: Vehicle) -> Option<PathBuf> {
         .into_iter()
         .chain(registry_paths(STEAM, "InstallPath"))
         .chain(program_folders.clone().map(|path| path.join("Steam")));
-    if let Some(path) = steam_folders.find_map(|steam| in_steam_library(&steam, vehicle)) {
+    if let Some(path) = steam_folders.find_map(|steam| in_steam_library(&steam)) {
         return Some(path);
     }
 
     program_folders
         .flat_map(|folder| GAME_FOLDERS.map(|name| folder.join(name)))
-        .find(|path| vehicle.pack(path).is_ok())
+        .find(|path| is_game_root(path))
 }
 
-fn in_steam_library(steam: &Path, vehicle: Vehicle) -> Option<PathBuf> {
+fn in_steam_library(steam: &Path) -> Option<PathBuf> {
     let library_file = steam.join("steamapps/libraryfolders.vdf");
     let description = fs::read_to_string(library_file).unwrap_or_default();
     let libraries = pairs(&description)
@@ -67,7 +67,7 @@ fn in_steam_library(steam: &Path, vehicle: Vehicle) -> Option<PathBuf> {
                 .into_iter()
                 .chain(GAME_FOLDERS)
                 .map(|name| common.join(name))
-                .find(|path| vehicle.pack(path).is_ok())
+                .find(|path| is_game_root(path))
         })
 }
 
@@ -154,17 +154,16 @@ mod tests {
             "\"AppState\"\n{\n\"installdir\"\t\"War Thunder Custom\"\n}\n",
         )
         .unwrap();
-        fs::write(packs.join("jp_type_90.grp"), []).unwrap();
+        fs::write(game.join("aces.vromfs.bin"), []).unwrap();
 
-        assert_eq!(in_steam_library(&steam, Vehicle::Type90b), Some(game));
-        assert_eq!(in_steam_library(&steam, Vehicle::Leopard2a8), None);
+        assert_eq!(in_steam_library(&steam), Some(game));
     }
 
     #[test]
     #[ignore = "requires a locally registered War Thunder installation"]
     fn detects_the_local_game_installation() {
-        let found = detect(Vehicle::Leopard2a8).expect("War Thunder installation");
-        assert!(Vehicle::Leopard2a8.pack(&found).is_ok());
+        let found = detect().expect("War Thunder installation");
+        assert!(is_game_root(&found));
         println!("{}", found.display());
     }
 }

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use camo_translator::vehicle::Vehicle;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
@@ -10,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub(super) struct PreparePaths {
     pub game: String,
     pub scene: String,
-    pub vehicle: Vehicle,
+    pub vehicle: String,
     pub c4dpy: String,
     pub parent: String,
 }
@@ -21,6 +20,7 @@ pub(super) struct ExportPaths {
     pub project: String,
     pub textures: String,
     pub parent: String,
+    pub auto_parent: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -30,11 +30,13 @@ pub(super) struct Defaults {
     pub export: ExportPaths,
 }
 
-pub(super) fn file() -> Result<PathBuf> {
+pub(super) fn folder() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA").context("找不到本机应用数据目录")?;
-    Ok(PathBuf::from(local)
-        .join("Camo Translator")
-        .join("settings.json"))
+    Ok(PathBuf::from(local).join("Camo Translator"))
+}
+
+pub(super) fn file() -> Result<PathBuf> {
+    Ok(folder()?.join("settings.json"))
 }
 
 impl Defaults {
@@ -70,7 +72,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let mut paths = Defaults::load(&path).unwrap();
-        paths.prepare.vehicle = Vehicle::Type90b;
+        paths.prepare.vehicle = "jp_type_90b".into();
         paths.prepare.game = r"D:\Steam Library\steamapps\common\War Thunder".into();
         paths.prepare.scene = r"D:\模型\90B fixed.obj".into();
         paths.export.textures = r"D:\贴图\Painter PNG".into();

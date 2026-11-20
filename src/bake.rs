@@ -1,8 +1,8 @@
 use crate::dds::{material_pixel, write_rgba};
+use crate::materials::{SkinProfile, TextureBinding};
 use crate::progress::Progress;
 use crate::raster::{interpolate, pad_edges, texel, triangle};
 use crate::scene::{Face, Project, Uv, write_json};
-use crate::vehicle::Vehicle;
 use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
 use image::{ImageReader, RgbaImage};
@@ -28,10 +28,13 @@ pub struct ExportOptions {
     pub material: bool,
     pub alpha: Alpha,
     pub slots: Vec<String>,
+    pub bindings: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
 struct BaseReport {
+    #[serde(skip)]
+    overlay: bool,
     slot: String,
     file: String,
     material_file: Option<String>,
@@ -47,7 +50,7 @@ struct Report {
     base_size: u32,
     camo_size: u32,
     alpha: Alpha,
-    skin_config: Option<&'static str>,
+    skin_config: Option<String>,
     camo_pixels: usize,
     camo_shared_color_conflicts: usize,
     slots: Vec<BaseReport>,
@@ -220,11 +223,12 @@ impl Base {
         textures: &BTreeMap<u16, Tile>,
         reused: &[bool],
         alpha: Alpha,
+        binding: &TextureBinding,
     ) {
         for &index in indices {
             let face = &faces[index];
             let texture = &textures[&face.tile];
-            let coverage = if reused[face.object] {
+            let coverage = if binding.camouflage.is_some() && reused[face.object] {
                 REUSED | if face.camo.is_none() { MISSING_UV2 } else { 0 }
             } else {
                 FIXED
@@ -236,7 +240,7 @@ impl Base {
                 // surface's color and material if a Reused face also covers it.
                 if previous == 0 || (coverage == FIXED && previous & FIXED == 0) {
                     let uv = interpolate(face.paint, weights);
-                    self.color[i * 4..i * 4 + 3].copy_from_slice(&sample::<3>(&texture.base, uv));
+                    self.color[i * 4..i * 4 + 4].copy_from_slice(&sample::<4>(&texture.base, uv));
                     if let Some(buffer) = &mut self.material {
                         let packed = texture.packed(uv).expect("material maps were loaded");
                         buffer[i * 4..i * 4 + 4].copy_from_slice(&packed);
@@ -245,6 +249,9 @@ impl Base {
             });
         }
 
+        if !binding.overlay {
+            return;
+        }
         for (pixel, &coverage) in self
             .color
             .as_chunks_mut::<4>()
@@ -353,23 +360,23 @@ impl Camo {
 }
 
 fn save(path: PathBuf, size: u32, colors: &[u8]) -> Result<()> {
-    let target = File::create(&path).with_context(|| format!("Creating {}", path.display()))?;
+    let target = File::create_new(&path).with_context(|| format!("Creating {}", path.display()))?;
     write_rgba(BufWriter::new(target), size, size, colors)
         .with_context(|| format!("Writing {}", path.display()))
 }
 
 fn write_skin_config(
     folder: &Path,
-    vehicle: Vehicle,
+    unit: &str,
     slots: &[BaseReport],
-    has_camo: bool,
-) -> Result<&'static str> {
-    let (name, camouflage) = vehicle.skin_config();
+    patterns: &[(String, String)],
+) -> Result<String> {
+    let name = format!("{unit}.blk");
     let mut config = String::from("name:t=\"user\"\n");
-    if has_camo {
+    for (source, output) in patterns {
         writeln!(
             config,
-            "\nreplace_tex{{\n  from:t=\"{camouflage}*\"\n  to:t=\"camo.dds\"\n}}"
+            "\nreplace_tex{{\n  from:t=\"{source}*\"\n  to:t=\"{output}\"\n}}"
         )?;
     }
     for slot in slots {
@@ -377,10 +384,17 @@ fn write_skin_config(
         let color = color_file
             .strip_suffix(".dds")
             .context("Missing .dds extension")?;
-        writeln!(
-            config,
-            "\nset_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{color_file}\"\n  param:t=\"camo_skin_tex\"\n}}"
-        )?;
+        if slot.overlay {
+            writeln!(
+                config,
+                "\nset_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{color_file}\"\n  param:t=\"camo_skin_tex\"\n}}"
+            )?;
+        } else {
+            writeln!(
+                config,
+                "\nreplace_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{color_file}\"\n}}"
+            )?;
+        }
         if let Some(backing) = &slot.camo_base_file {
             writeln!(
                 config,
@@ -402,44 +416,55 @@ fn write_skin_config(
             )?;
         }
     }
-    let path = folder.join(name);
+    let path = folder.join(&name);
     fs::write(&path, config).with_context(|| format!("Writing {}", path.display()))?;
     Ok(name)
 }
 
 fn selected<'a>(
     names: &'a [String],
-    request: &[String],
-    vehicle: Vehicle,
-) -> Result<Vec<(usize, &'a str, &'static str)>> {
+    options: &ExportOptions,
+    profile: &'a SkinProfile,
+) -> Result<Vec<(usize, &'a str, &'a TextureBinding)>> {
     let mut slots = Vec::new();
-    for (i, name) in names.iter().enumerate() {
-        if (request.is_empty() || request.iter().any(|item| item.eq_ignore_ascii_case(name)))
-            && let Some(stem) = vehicle.game_texture(name)
+    for (index, slot) in names.iter().enumerate() {
+        if !options.slots.is_empty()
+            && !options
+                .slots
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(slot))
         {
-            slots.push((i, name.as_str(), stem));
+            continue;
+        }
+        let binding = if let Some(target) = options.bindings.get(slot) {
+            Some(
+                profile
+                    .candidates
+                    .iter()
+                    .chain(profile.slots.values())
+                    .find(|binding| binding.color.eq_ignore_ascii_case(target))
+                    .with_context(|| {
+                        format!("{target} is not a game texture for {}", profile.unit)
+                    })?,
+            )
+        } else {
+            profile.slots.get(slot)
+        };
+        if let Some(binding) = binding {
+            slots.push((index, slot.as_str(), binding));
         }
     }
-    for item in request {
+    for item in &options.slots {
         ensure!(
             slots
                 .iter()
                 .any(|(_, name, _)| item.eq_ignore_ascii_case(name)),
-            "Unknown export slot {item}. See the supported slots in prepare-report.json."
+            "Assign a game texture to the Painter slot {item} before export."
         );
     }
-
-    let stems = slots
-        .iter()
-        .map(|(_, _, stem)| stem)
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        stems.len() == slots.len(),
-        "Selected texture sets target the same DDS. Specify a single source slot for that DDS."
-    );
     ensure!(
         !slots.is_empty(),
-        "There are no supported game texture slots to export"
+        "Assign a game texture to at least one Painter slot"
     );
     Ok(slots)
 }
@@ -470,10 +495,10 @@ pub fn export_with_progress(
             "Use a power-of-two texture size from 128 to 8192"
         );
     }
-    let (target, stage) = crate::new_output(out)?;
+    let (target, stage) = crate::skin_output::stage(out)?;
     progress(Progress::ReadProject);
     let project = Project::load(project)?;
-    let vehicle = Vehicle::from_model(&project.model).context("Unsupported vehicle")?;
+    let profile = project.profile()?;
     let faces = &project.scene.faces;
     let pngs = PainterPngs::read(painter_pngs)?;
     let reused: Vec<_> = project
@@ -482,31 +507,84 @@ pub fn export_with_progress(
         .iter()
         .map(|object| object.is_reused())
         .collect();
-    let mut camo = None;
+    let mut camos = BTreeMap::<String, Camo>::new();
     let mut base_reports = Vec::new();
 
-    for (slot, name, stem) in selected(&project.scene.slots, &options.slots, vehicle)? {
-        let indices: Vec<_> = faces
-            .iter()
-            .enumerate()
-            .filter_map(|(i, face)| (face.slot == slot).then_some(i))
-            .collect();
-        let tiles: BTreeSet<_> = indices.iter().map(|&i| faces[i].tile).collect();
-        progress(Progress::ReadTextures {
-            slot: name,
-            tiles: tiles.len(),
-        });
-        let textures: BTreeMap<_, _> = tiles
-            .into_iter()
-            .map(|tile| Ok((tile, Tile::load(&pngs, name, tile, options.material)?)))
-            .collect::<Result<_>>()?;
-        progress(Progress::ReprojectTextures {
-            slot: name,
-            tiles: textures.len(),
-        });
+    let selected = selected(&project.scene.slots, options, &profile)?;
+    let mut groups = Vec::<(&TextureBinding, Vec<(usize, &str)>)>::new();
+    for (slot, name, binding) in selected {
+        if let Some((_, members)) = groups
+            .iter_mut()
+            .find(|(existing, _)| existing.color.eq_ignore_ascii_case(&binding.color))
+        {
+            members.push((slot, name));
+        } else {
+            groups.push((binding, vec![(slot, name)]));
+        }
+    }
 
-        let mut base = Base::new(options.size, options.material);
-        base.paint(faces, &indices, &textures, &reused, options.alpha);
+    let mut material_owners = BTreeMap::new();
+    if options.material {
+        for (group, (binding, _)) in groups.iter().enumerate() {
+            if let Some(normal) = &binding.normal {
+                let aligned = binding.color.strip_suffix("_c") == normal.strip_suffix("_n");
+                let owner = material_owners
+                    .entry(normal.as_str())
+                    .or_insert((group, aligned));
+                if aligned && !owner.1 {
+                    *owner = (group, true);
+                }
+            }
+        }
+    }
+
+    for (group, (binding, members)) in groups.into_iter().enumerate() {
+        let normal = binding.normal.as_deref().filter(|normal| {
+            material_owners
+                .get(normal)
+                .is_some_and(|&(owner, _)| owner == group)
+        });
+        let export_material = normal.is_some();
+        let mut base = Base::new(options.size, export_material);
+        let mut camo_sources = Vec::new();
+        let slot_label = members
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        for (slot, name) in members {
+            let indices: Vec<_> = faces
+                .iter()
+                .enumerate()
+                .filter_map(|(i, face)| (face.slot == slot).then_some(i))
+                .collect();
+            let tiles: BTreeSet<_> = indices.iter().map(|&i| faces[i].tile).collect();
+            progress(Progress::ReadTextures {
+                slot: name,
+                tiles: tiles.len(),
+            });
+            let mut textures: BTreeMap<_, _> = tiles
+                .into_iter()
+                .map(|tile| Ok((tile, Tile::load(&pngs, name, tile, export_material)?)))
+                .collect::<Result<_>>()?;
+            progress(Progress::ReprojectTextures {
+                slot: name,
+                tiles: textures.len(),
+            });
+            base.paint(faces, &indices, &textures, &reused, options.alpha, binding);
+            if binding.camouflage.is_some()
+                && indices.iter().any(|&i| {
+                    let face = &faces[i];
+                    reused[face.object] && face.camo.is_some()
+                })
+            {
+                for tile in textures.values_mut() {
+                    tile.material = None;
+                }
+                camo_sources.push((indices, textures));
+            }
+        }
+
         let active = base
             .coverage
             .iter()
@@ -524,14 +602,20 @@ pub fn export_with_progress(
             .count();
         if mixed != 0 || missing != 0 {
             progress(Progress::ReusedUvWarning {
-                slot: name,
+                slot: &slot_label,
                 mixed,
                 missing,
             });
         }
-        if active != 0 {
-            camo.get_or_insert_with(|| Camo::new(options.camo_size))
-                .paint(&base, faces, &indices, &textures, &reused);
+        if active != 0
+            && let Some(pattern) = &binding.camouflage
+        {
+            let camo = camos
+                .entry(pattern.clone())
+                .or_insert_with(|| Camo::new(options.camo_size));
+            for (indices, textures) in camo_sources {
+                camo.paint(&base, faces, &indices, &textures, &reused);
+            }
         }
         let covered_pixels = base
             .coverage
@@ -539,16 +623,17 @@ pub fn export_with_progress(
             .filter(|&&coverage| coverage != 0)
             .count();
         base.pad();
-        let color_name = format!("{stem}_c.dds");
+        let color_name = format!("{}.dds", binding.color);
         save(stage.path().join(&color_name), base.size, &base.color)?;
-        let material_name = if let Some(data) = &base.material {
-            let name = format!("{stem}_n.dds");
+        let material_name = if let (Some(normal), Some(data)) = (normal, &base.material) {
+            let name = format!("{normal}.dds");
             save(stage.path().join(&name), base.size, data)?;
             Some(name)
         } else {
             None
         };
         let camo_base_file = if active != 0 && options.alpha == Alpha::FixedWhite {
+            let stem = binding.color.strip_suffix("_c").unwrap_or(&binding.color);
             let name = format!("{stem}_camo_base.dds");
             base.apply_camo_backing();
             save(stage.path().join(&name), base.size, &base.color)?;
@@ -557,7 +642,8 @@ pub fn export_with_progress(
             None
         };
         base_reports.push(BaseReport {
-            slot: name.to_owned(),
+            overlay: binding.overlay,
+            slot: slot_label,
             file: color_name,
             material_file: material_name,
             camo_base_file,
@@ -569,30 +655,34 @@ pub fn export_with_progress(
     }
 
     progress(Progress::WriteCamouflage);
-    let camo_pixels = if let Some(camo) = &mut camo {
-        let painted = camo.order.iter().filter(|&&value| value != 0).count();
+    let mut camo_pixels = 0;
+    let mut conflicts = 0;
+    let mut patterns = Vec::new();
+    for (index, (pattern, mut camo)) in camos.into_iter().enumerate() {
+        camo_pixels += camo.order.iter().filter(|&&value| value != 0).count();
+        conflicts += camo.conflicts.iter().filter(|&&conflict| conflict).count();
         let pixels = camo.color.as_chunks_mut::<4>().0;
         pad_edges(camo.size, &mut camo.order, |target, source| {
             pixels[target] = pixels[source]
         });
-        save(stage.path().join("camo.dds"), camo.size, &camo.color)?;
-        painted
-    } else {
-        0
-    };
+        let name = if index == 0 {
+            "camo.dds".to_owned()
+        } else {
+            format!("camo_{}.dds", index + 1)
+        };
+        save(stage.path().join(&name), camo.size, &camo.color)?;
+        patterns.push((pattern, name));
+    }
     let skin_config = if options.alpha == Alpha::FixedWhite {
         Some(write_skin_config(
             stage.path(),
-            vehicle,
+            &profile.unit,
             &base_reports,
-            camo.is_some(),
+            &patterns,
         )?)
     } else {
         None
     };
-    let conflicts = camo.as_ref().map_or(0, |camo| {
-        camo.conflicts.iter().filter(|&&conflict| conflict).count()
-    });
     if conflicts != 0 {
         progress(Progress::CamoUvConflict(conflicts));
     }
@@ -606,7 +696,7 @@ pub fn export_with_progress(
         slots: base_reports,
     };
     write_json(&stage.path().join("export-report.json"), &report, true)?;
-    crate::publish_output(stage, &target)?;
+    crate::skin_output::publish(stage, &target)?;
     Ok(target)
 }
 

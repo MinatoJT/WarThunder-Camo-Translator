@@ -1,9 +1,9 @@
 use anyhow::Result;
 use camo_translator::{
     bake::{self, ExportOptions},
+    catalog::InstalledVehicle,
     prepare,
     progress::Progress,
-    vehicle::Vehicle,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ pub enum Job {
         project: String,
         scene: PathBuf,
         game: PathBuf,
-        vehicle: Vehicle,
+        vehicle: InstalledVehicle,
         c4dpy: Option<PathBuf>,
         out: PathBuf,
     },
@@ -52,7 +52,7 @@ impl Job {
                 project,
                 &scene,
                 &game,
-                vehicle,
+                &vehicle,
                 c4dpy.as_deref(),
                 &out,
                 progress,
@@ -95,7 +95,7 @@ impl Job {
 fn chinese(progress: Progress<'_>) -> String {
     match progress {
         Progress::ReadMesh => "读取源模型与材质槽".into(),
-        Progress::MatchCamouflage(_) => "匹配游戏原版迷彩 UV2".into(),
+        Progress::MatchCamouflage(_) => "匹配游戏模型、材质和迷彩 UV".into(),
         Progress::FaceMatches { matched, total } => format!("已匹配 {matched} / {total} 个三角面"),
         Progress::SeparateUvIslands => "安排 Reused 的独立 UV".into(),
         Progress::WritePainterMesh => "保存 Painter 模型和项目".into(),

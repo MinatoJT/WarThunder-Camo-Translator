@@ -3,16 +3,19 @@ use super::{
     game_directory,
     job::Job,
     theme,
+    vehicle_picker::VehiclePicker,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use camo_translator::{
     bake::{Alpha, ExportOptions},
+    catalog::{is_game_root, user_skins},
+    materials::TextureBinding,
+    prepare::PAINTER_PNG_DIR,
     scene::read_json,
-    vehicle::Vehicle,
 };
 use eframe::egui::{self, ComboBox, TextEdit, Ui};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 const SIZES: [u32; 7] = [128, 256, 512, 1024, 2048, 4096, 8192];
@@ -21,12 +24,15 @@ pub struct PrepareForm {
     pub(super) paths: PreparePaths,
     name: String,
     detection: Option<bool>,
+    vehicles: VehiclePicker,
+    tutorial: Option<egui::TextureHandle>,
+    show_screenshot: bool,
 }
 
 impl PrepareForm {
     pub fn new(home: &Path, mut paths: PreparePaths) -> Self {
         if paths.game.trim().is_empty()
-            && let Some(folder) = game_directory::detect(paths.vehicle)
+            && let Some(folder) = game_directory::detect()
         {
             paths.game = path_text(&folder);
         }
@@ -42,6 +48,9 @@ impl PrepareForm {
             paths,
             name: String::new(),
             detection: None,
+            vehicles: VehiclePicker::default(),
+            tutorial: None,
+            show_screenshot: false,
         }
     }
 
@@ -58,7 +67,7 @@ impl PrepareForm {
         }
         ui.horizontal(|ui| {
             if ui.small_button("自动检测").clicked() {
-                let found = game_directory::detect(self.paths.vehicle);
+                let found = game_directory::detect();
                 self.detection = Some(found.is_some());
                 if let Some(folder) = found {
                     self.paths.game = path_text(&folder);
@@ -69,26 +78,20 @@ impl PrepareForm {
                     ui.label(theme::note("已找到游戏目录"));
                 }
                 Some(false) => {
-                    ui.label(theme::note("未找到所选车型的安装目录，请手动浏览"));
+                    ui.label(theme::note("未找到 War Thunder 安装目录，请手动浏览"));
                 }
                 None => {}
             }
         });
         ui.add_space(6.0);
-        ui.label(theme::label("车型"));
-        ComboBox::from_id_salt("vehicle")
-            .width(ui.available_width())
-            .selected_text(vehicle_name(self.paths.vehicle))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.paths.vehicle, Vehicle::Leopard2a8, "豹 2A8");
-                ui.selectable_value(&mut self.paths.vehicle, Vehicle::Type90b, "90B");
-            });
+        let game = path(&self.paths.game);
+        self.vehicles.show(ui, &game, &mut self.paths.vehicle);
 
         ui.add_space(6.0);
         if path_row(
             ui,
             frame,
-            "源模型",
+            "你已经修完的模型（把想要用camo覆盖的部分单独放进一个Reused对象）",
             &mut self.paths.scene,
             "选择保存好的 C4D 工程或 OBJ",
             Picker::Scene,
@@ -125,38 +128,57 @@ impl PrepareForm {
         );
     }
 
-    pub fn show_details(&self, ui: &mut Ui) {
-        ui.label(theme::label("项目文件").size(18.0));
-        ui.add_space(6.0);
-        let output = if path(&self.paths.scene)
-            .extension()
-            .is_some_and(|v| v.eq_ignore_ascii_case("obj"))
-        {
-            "Painter.obj + Painter.mtl"
-        } else if self.is_c4d() {
-            "Painter.fbx"
-        } else {
-            "Painter.fbx 或 Painter.obj"
-        };
-        detail(ui, output, "导入 Painter 时启用 UV Tile 工作流");
-        detail(
-            ui,
-            "project.json",
-            "保存原 UV、Painter UV 与迷彩 UV2 的对应",
-        );
-        detail(
-            ui,
-            "prepare-report.json",
-            "查看材质槽、UDIM 与 UV2 匹配情况",
-        );
+    pub fn show_tutorial(&mut self, ui: &mut Ui) {
+        ui.label(theme::label("1. 把想去除 UV 复用的车体零件用「连接对象 + 删除」合成一个独立对象，命名为 Reused，再交给工具处理。"));
+        ui.add_space(5.0);
+        ui.label(theme::label(
+            "2. 把生成的 Painter 模型导入 Substance Painter，按图设置项目。",
+        ));
+        const SETTINGS: &[u8] = include_bytes!("../../assets/painter-settings.png");
+        if self.tutorial.is_none() {
+            self.tutorial = image::load_from_memory(SETTINGS).ok().map(|image| {
+                let image = image.into_rgba8();
+                let size = [image.width() as usize, image.height() as usize];
+                ui.ctx().load_texture(
+                    "painter-settings",
+                    egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        }
+        if let Some(texture) = &self.tutorial {
+            let width = ui.available_width().min(texture.size_vec2().x);
+            let size = texture.size_vec2() * (width / texture.size_vec2().x);
+            if ui
+                .add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click()))
+                .on_hover_text("点击放大 Painter 设置")
+                .clicked()
+            {
+                self.show_screenshot = true;
+            }
+            if self.show_screenshot {
+                egui::Window::new("Substance Painter 项目设置")
+                    .open(&mut self.show_screenshot)
+                    .resizable(false)
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        let available = ui.ctx().content_rect().size() - egui::vec2(50.0, 92.0);
+                        let scale = (available.x / texture.size_vec2().x)
+                            .min(available.y / texture.size_vec2().y)
+                            .clamp(0.3, 1.0);
+                        ui.image((texture.id(), texture.size_vec2() * scale));
+                    });
+            }
+        }
+        ui.add_space(5.0);
+        ui.label(theme::label(
+            "3. 画完涂装后把 PNG 导出到项目的 Painter PNG 文件夹，再用工具生成涂装 DDS 和 BLK。",
+        ));
     }
 
     pub fn job(&self) -> Result<Job> {
         let game = directory(&self.paths.game, "请选择 War Thunder 安装目录")?;
-        self.paths
-            .vehicle
-            .pack(&game)
-            .context("在所选游戏目录找不到此车型的资源")?;
+        let vehicle = self.vehicles.selected(&self.paths.vehicle)?.clone();
         let scene = file(&self.paths.scene, "请选择源模型文件")?;
         let extension = scene.extension().and_then(|v| v.to_str()).unwrap_or("");
         ensure!(
@@ -171,12 +193,12 @@ impl PrepareForm {
         } else {
             None
         };
-        let (project, out) = output(&self.paths.parent, &self.name)?;
+        let (project, out) = output(&self.paths.parent, &self.name, false)?;
         Ok(Job::Prepare {
             project,
             scene,
             game,
-            vehicle: self.paths.vehicle,
+            vehicle,
             c4dpy,
             out,
         })
@@ -193,6 +215,10 @@ impl PrepareForm {
 struct ProjectBrief {
     project: String,
     model: String,
+    #[serde(default)]
+    vehicle_name: String,
+    #[serde(default)]
+    texture_candidates: Vec<TextureBinding>,
     slots: Vec<Slot>,
 }
 
@@ -213,14 +239,19 @@ pub struct ExportForm {
     inspected: PathBuf,
     brief: Option<ProjectBrief>,
     slots: BTreeSet<String>,
+    bindings: BTreeMap<String, String>,
 }
 
 impl ExportForm {
-    pub fn new(home: &Path, mut paths: ExportPaths) -> Self {
-        if paths.parent.trim().is_empty() {
-            paths.parent = path_text(&home.join("preview"));
-        }
-        Self {
+    pub fn new(home: &Path, game: &str, mut paths: ExportPaths) -> Self {
+        let initial_parent = path(&paths.parent);
+        let auto = paths.auto_parent.unwrap_or_else(|| {
+            initial_parent.as_os_str().is_empty()
+                || initial_parent == home.join("preview")
+                || initial_parent == user_skins(&path(game))
+        });
+        paths.auto_parent = Some(auto);
+        let mut form = Self {
             paths,
             name: String::new(),
             size: 4096,
@@ -230,15 +261,36 @@ impl ExportForm {
             inspected: PathBuf::new(),
             brief: None,
             slots: BTreeSet::new(),
+            bindings: BTreeMap::new(),
+        };
+        form.follow_game(game);
+        let saved_textures = form.paths.textures.clone();
+        form.inspect();
+        if !saved_textures.trim().is_empty() {
+            form.paths.textures = saved_textures;
+        }
+        form
+    }
+
+    pub fn follow_game(&mut self, game: &str) {
+        if self.paths.auto_parent == Some(true) {
+            let root = path(game);
+            if is_game_root(&root) {
+                self.paths.parent = path_text(&user_skins(&root));
+            }
         }
     }
 
     pub fn use_project(&mut self, project: &Path) {
         self.paths.project = path_text(project);
+        let textures = project.join(PAINTER_PNG_DIR);
+        if textures.is_dir() {
+            self.paths.textures = path_text(&textures);
+        }
         self.inspect();
     }
 
-    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame) {
+    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame, game: &str) {
         path_row(
             ui,
             frame,
@@ -258,16 +310,31 @@ impl ExportForm {
             Picker::Folder,
         );
         ui.add_space(6.0);
-        path_row(
+        if path_row(
             ui,
             frame,
             "输出保存位置",
             &mut self.paths.parent,
-            "选择存放 DDS 的目录",
+            "自动选用游戏的 UserSkins",
             Picker::Folder,
-        );
+        ) {
+            self.paths.auto_parent = Some(false);
+        }
+        if ui.small_button("使用游戏 UserSkins").clicked() {
+            self.paths.auto_parent = Some(true);
+            self.follow_game(game);
+            if !is_game_root(&path(game))
+                && let Some(root) = game_directory::detect()
+            {
+                self.paths.parent = path_text(&user_skins(&root));
+            }
+        }
         ui.add_space(6.0);
         text_row(ui, "输出文件夹名", &mut self.name, "例如 Leopard2A8-skin");
+        if !self.name.trim().is_empty() && path(&self.paths.parent).join(self.name.trim()).is_dir()
+        {
+            ui.label(theme::note("本次生成的同名文件将覆盖现有文件"));
+        }
 
         ui.add_space(14.0);
         ui.separator();
@@ -300,9 +367,12 @@ impl ExportForm {
     pub fn show_details(&mut self, ui: &mut Ui) {
         if let Some(brief) = &self.brief {
             ui.label(theme::label(brief.project.as_str()).size(18.0));
-            if let Some(vehicle) = Vehicle::from_model(&brief.model) {
-                ui.label(theme::note(vehicle_name(vehicle)));
-            }
+            let vehicle = if brief.vehicle_name.is_empty() {
+                &brief.model
+            } else {
+                &brief.vehicle_name
+            };
+            ui.label(theme::note(vehicle));
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(6.0);
@@ -310,13 +380,56 @@ impl ExportForm {
                 ui.label(theme::label("导出材质槽"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("全选").clicked() {
-                        self.slots = brief.slots.iter().map(|slot| slot.name.clone()).collect();
+                        self.slots = brief
+                            .slots
+                            .iter()
+                            .filter(|slot| {
+                                slot.game_texture.is_some()
+                                    || self.bindings.contains_key(&slot.name)
+                            })
+                            .map(|slot| slot.name.clone())
+                            .collect();
                     }
                 });
             });
             for slot in &brief.slots {
+                let mut target = self
+                    .bindings
+                    .get(&slot.name)
+                    .cloned()
+                    .or_else(|| slot.game_texture.clone())
+                    .unwrap_or_default();
+                if !brief.texture_candidates.is_empty() {
+                    let previous = target.clone();
+                    ComboBox::from_id_salt(("texture_binding", &slot.name))
+                        .width(ui.available_width())
+                        .selected_text(if target.is_empty() {
+                            "选择游戏贴图"
+                        } else {
+                            &target
+                        })
+                        .show_ui(ui, |ui| {
+                            for binding in &brief.texture_candidates {
+                                ui.selectable_value(
+                                    &mut target,
+                                    binding.color.clone(),
+                                    &binding.color,
+                                );
+                            }
+                        });
+                    if target != previous {
+                        self.bindings.insert(slot.name.clone(), target.clone());
+                        self.slots.insert(slot.name.clone());
+                    }
+                }
                 let mut selected = self.slots.contains(&slot.name);
-                if ui.checkbox(&mut selected, &slot.name).changed() {
+                if ui
+                    .add_enabled(
+                        !target.is_empty(),
+                        egui::Checkbox::new(&mut selected, &slot.name),
+                    )
+                    .changed()
+                {
                     if selected {
                         self.slots.insert(slot.name.clone());
                     } else {
@@ -355,7 +468,7 @@ impl ExportForm {
             "所选项目目录缺少 project.json"
         );
         let textures = directory(&self.paths.textures, "请选择 Painter PNG 目录")?;
-        let (_, out) = output(&self.paths.parent, &self.name)?;
+        let (_, out) = output(&self.paths.parent, &self.name, true)?;
         ensure!(
             self.brief.is_none() || !self.slots.is_empty(),
             "请至少选择一个材质槽"
@@ -370,6 +483,7 @@ impl ExportForm {
             material: self.material,
             alpha: self.alpha,
             slots: self.slots.iter().cloned().collect(),
+            bindings: self.bindings.clone(),
         };
         Ok(Job::Export {
             project,
@@ -385,20 +499,25 @@ impl ExportForm {
             return;
         }
         self.inspected = folder.clone();
+        self.bindings.clear();
+        let textures = folder.join(PAINTER_PNG_DIR);
+        if !folder.as_os_str().is_empty() && textures.is_dir() {
+            self.paths.textures = path_text(&textures);
+        }
         self.brief = if folder.as_os_str().is_empty() {
             None
         } else {
-            read_json::<ProjectBrief>(&folder.join("prepare-report.json"))
-                .ok()
-                .map(|mut project| {
-                    project.slots.retain(|slot| slot.game_texture.is_some());
-                    project
-                })
+            read_json::<ProjectBrief>(&folder.join("prepare-report.json")).ok()
         };
         self.slots = self
             .brief
             .iter()
-            .flat_map(|p| p.slots.iter().map(|s| s.name.clone()))
+            .flat_map(|p| {
+                p.slots
+                    .iter()
+                    .filter(|s| s.game_texture.is_some())
+                    .map(|s| s.name.clone())
+            })
             .collect();
         if self.name.trim().is_empty()
             && let Some(brief) = &self.brief
@@ -448,11 +567,11 @@ fn file(value: &str, message: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
-fn output(parent: &str, name: &str) -> Result<(String, PathBuf)> {
+fn output(parent: &str, name: &str, allow_existing: bool) -> Result<(String, PathBuf)> {
     let parent = path(parent);
     let name = name.trim();
     ensure!(!parent.as_os_str().is_empty(), "请选择输出保存位置");
-    ensure!(!name.is_empty(), "请输入新文件夹名称");
+    ensure!(!name.is_empty(), "请输入文件夹名称");
     let mut components = Path::new(name).components();
     ensure!(
         matches!(components.next(), Some(Component::Normal(_)))
@@ -462,15 +581,11 @@ fn output(parent: &str, name: &str) -> Result<(String, PathBuf)> {
         "请填写一个有效的文件夹名称"
     );
     let target = parent.join(name);
-    ensure!(!target.exists(), "输出目录已存在，请换一个名称");
+    ensure!(
+        !target.exists() || (allow_existing && target.is_dir()),
+        "输出位置不可用，请换一个名称"
+    );
     Ok((name.to_owned(), target))
-}
-
-fn vehicle_name(vehicle: Vehicle) -> &'static str {
-    match vehicle {
-        Vehicle::Leopard2a8 => "豹 2A8",
-        Vehicle::Type90b => "90B",
-    }
 }
 
 fn alpha_name(alpha: Alpha) -> &'static str {
@@ -554,4 +669,31 @@ fn path_row(
         }
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_detected_user_skins_and_the_prepared_png_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path();
+        let game = root.join("War Thunder");
+        std::fs::create_dir_all(game.join("content/base/res")).unwrap();
+        std::fs::write(game.join("aces.vromfs.bin"), []).unwrap();
+        let project = root.join("new project");
+        let png = project.join(PAINTER_PNG_DIR);
+        std::fs::create_dir_all(&png).unwrap();
+
+        let mut form = ExportForm::new(root, &path_text(&game), ExportPaths::default());
+        assert_eq!(path(&form.paths.parent), game.join("UserSkins"));
+        form.use_project(&project);
+        assert_eq!(path(&form.paths.textures), png);
+
+        form.paths.parent = path_text(&root.join("custom"));
+        form.paths.auto_parent = Some(false);
+        form.follow_game(&path_text(&game));
+        assert_eq!(path(&form.paths.parent), root.join("custom"));
+    }
 }

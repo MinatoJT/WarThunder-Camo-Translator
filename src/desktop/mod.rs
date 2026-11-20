@@ -3,6 +3,8 @@ mod forms;
 mod game_directory;
 mod job;
 mod theme;
+mod vehicle_cache;
+mod vehicle_picker;
 
 use anyhow::Result;
 use defaults::Defaults;
@@ -151,10 +153,12 @@ impl Desktop {
             Ok(paths) => (paths, None),
             Err(error) => (Defaults::default(), Some(Err(format!("{error:#}")))),
         };
+        let prepare = PrepareForm::new(&home, paths.prepare);
+        let export = ExportForm::new(&home, &prepare.paths.game, paths.export);
         Self {
             tab: Tab::Prepare,
-            prepare: PrepareForm::new(&home, paths.prepare),
-            export: ExportForm::new(&home, paths.export),
+            prepare,
+            export,
             running: None,
             notice: None,
             path_status,
@@ -175,6 +179,11 @@ impl Desktop {
                 }
                 Ok(Event::Warning(warning)) => running.warnings.push(warning),
                 Ok(Event::Finished(result)) => {
+                    if running.tab == Tab::Prepare
+                        && let Ok(folder) = &result
+                    {
+                        self.export.use_project(folder);
+                    }
                     self.notice = Some(match result {
                         Ok(folder) => Notice::Complete {
                             tab: running.tab,
@@ -317,7 +326,6 @@ impl Desktop {
                             *open_error = open_output(folder).err().map(|error| error.to_string());
                         }
                         if *tab == Tab::Prepare && ui.button("去导出涂装").clicked() {
-                            self.export.use_project(folder);
                             self.tab = Tab::Export;
                         }
                     }
@@ -349,6 +357,10 @@ impl Desktop {
                     .id_salt(self.tab as u8)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if self.tab == Tab::Prepare {
+                            ui.label(theme::title("准备 Painter 模型"));
+                            ui.add_space(10.0);
+                        }
                         ui.horizontal_top(|ui| {
                             let info_width = 278.0;
                             let form_width = (ui.available_width() - info_width - 23.0).max(360.0);
@@ -359,12 +371,8 @@ impl Desktop {
                                     ui.set_width(form_width);
                                     match self.tab {
                                         Tab::Prepare => {
-                                            ui.label(theme::title("准备 Painter 模型"));
-                                            ui.label(theme::note(
-                                                "保留普通共用 UV，为 Reused 对象安排独立 UV。",
-                                            ));
-                                            ui.add_space(10.0);
                                             self.prepare.show(ui, native);
+                                            self.export.follow_game(&self.prepare.paths.game);
                                         }
                                         Tab::Export => {
                                             ui.label(theme::title("从 Painter 回写 DDS"));
@@ -372,7 +380,7 @@ impl Desktop {
                                                 "把绘制结果映射到原纹理和游戏迷彩图。",
                                             ));
                                             ui.add_space(10.0);
-                                            self.export.show(ui, native);
+                                            self.export.show(ui, native, &self.prepare.paths.game);
                                         }
                                     }
                                     ui.add_space(10.0);
@@ -388,7 +396,7 @@ impl Desktop {
                                         ui.set_min_width(info_width - 38.0);
                                         ui.spacing_mut().item_spacing.y = 5.0;
                                         match self.tab {
-                                            Tab::Prepare => self.prepare.show_details(ui),
+                                            Tab::Prepare => self.prepare.show_tutorial(ui),
                                             Tab::Export => self.export.show_details(ui),
                                         }
                                     });
@@ -437,7 +445,7 @@ impl Desktop {
                         );
                         for warning in warnings {
                             ui.add(
-                                egui::Label::new(theme::note(warning).color(theme::ERROR))
+                                egui::Label::new(theme::note(warning).color(theme::TEXT))
                                     .wrap()
                                     .selectable(true),
                             );

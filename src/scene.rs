@@ -1,6 +1,8 @@
+use crate::materials::{SkinProfile, TextureBinding};
 use crate::vehicle::Vehicle;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -55,13 +57,15 @@ pub struct Project {
     pub version: u32,
     pub name: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin: Option<SkinProfile>,
     pub scene: Scene,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SlotInfo<'a> {
     pub name: &'a str,
-    pub game_texture: Option<&'static str>,
+    pub game_texture: Option<String>,
     pub triangles: usize,
     pub matched_uv2: usize,
     pub reused_triangles: usize,
@@ -72,6 +76,9 @@ pub struct SlotInfo<'a> {
 pub struct PrepareReport<'a> {
     pub project: &'a str,
     pub model: &'a str,
+    pub vehicle: String,
+    pub vehicle_name: String,
+    pub texture_candidates: Vec<TextureBinding>,
     pub objects: &'a [Object],
     pub slots: Vec<SlotInfo<'a>>,
 }
@@ -162,24 +169,58 @@ impl Project {
             "Unsupported project format {}",
             project.version
         );
-        ensure!(
-            Vehicle::from_model(&project.model).is_some(),
-            "Unsupported game model {}",
-            project.model
-        );
+        project.profile()?.validate()?;
         project.scene.validate(true)?;
         Ok(project)
     }
 
-    pub fn report(&self) -> PrepareReport<'_> {
+    pub fn profile(&self) -> Result<Cow<'_, SkinProfile>> {
+        if let Some(profile) = &self.skin {
+            return Ok(Cow::Borrowed(profile));
+        }
+        let vehicle = Vehicle::from_model(&self.model).with_context(|| {
+            format!(
+                "The project for {} is missing game texture bindings",
+                self.model
+            )
+        })?;
+        let (blk, camo) = vehicle.skin_config();
+        let slots = self
+            .scene
+            .slots
+            .iter()
+            .filter_map(|name| {
+                let stem = vehicle.game_texture(name)?;
+                let binding = TextureBinding {
+                    color: format!("{stem}_c"),
+                    normal: Some(format!("{stem}_n")),
+                    camouflage: Some(camo.to_owned()),
+                    overlay: true,
+                };
+                Some((name.clone(), binding))
+            })
+            .collect();
+        Ok(Cow::Owned(SkinProfile {
+            unit: blk.trim_end_matches(".blk").to_owned(),
+            name: match vehicle {
+                Vehicle::Type90b => "90B",
+                Vehicle::Leopard2a8 => "豹 2A8",
+            }
+            .into(),
+            slots,
+            candidates: Vec::new(),
+        }))
+    }
+
+    pub fn report(&self) -> Result<PrepareReport<'_>> {
+        let profile = self.profile()?;
         let mut slots: Vec<_> = self
             .scene
             .slots
             .iter()
             .map(|name| SlotInfo {
                 name,
-                game_texture: Vehicle::from_model(&self.model)
-                    .and_then(|vehicle| vehicle.game_texture(name)),
+                game_texture: profile.slots.get(name).map(|binding| binding.color.clone()),
                 triangles: 0,
                 matched_uv2: 0,
                 reused_triangles: 0,
@@ -193,11 +234,14 @@ impl Project {
             slot.reused_triangles += usize::from(self.scene.objects[face.object].is_reused());
             slot.tiles.insert(face.tile);
         }
-        PrepareReport {
+        Ok(PrepareReport {
             project: &self.name,
             model: &self.model,
+            vehicle: profile.unit.clone(),
+            vehicle_name: profile.name.clone(),
+            texture_candidates: profile.candidates.clone(),
             objects: &self.scene.objects,
             slots,
-        }
+        })
     }
 }
