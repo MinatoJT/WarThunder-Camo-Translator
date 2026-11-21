@@ -5,6 +5,8 @@
 
 Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入 `Reused` 对象的零件生成独立 UV 和可导入 Substance 3D Painter 的模型，再通过游戏的 **Camo（迷彩）机制**把各自的底色覆盖到对应零件。Camo 适用于游戏中支持迷彩的材质。
 
+[下载首版 Demo（Windows x64）](https://github.com/MinatoJT/Camo-Translator/releases/tag/v0.2.2-demo.1)
+
 ## 三步上手
 
 1. **准备模型。** 把想独立上色的零件合并到一个名为 `Reused` 的对象，保留原 UV 和材质槽。在工具里选择游戏目录、载具和源模型，填写项目保存位置，点击 **生成 Painter 模型**。工具会生成 `Painter.fbx` 或 `Painter.obj`，并创建 `Painter PNG` 文件夹。
