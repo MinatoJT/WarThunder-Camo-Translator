@@ -82,6 +82,4 @@ $game = 'D:\Games\War Thunder'
 - `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。
 
 
-Alpha 混合和迷彩比例以游戏内验收为准。
-
 </details>
