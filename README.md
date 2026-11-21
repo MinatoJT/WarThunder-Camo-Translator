@@ -9,7 +9,7 @@ Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入
 
 ## 三步上手
 
-1. **准备模型。** 把想独立上色的零件合并到一个名为 `Reused` 的对象，保留原 UV 和材质槽。在工具里选择游戏目录、载具和源模型，填写项目保存位置，点击 **生成 Painter 模型**。工具会生成 `Painter.fbx` 或 `Painter.obj`，并创建 `Painter PNG` 文件夹。
+1. **准备模型。** 把想独立上色的，原来有uv复用的零件合并到一个名为 `Reused` 的对象，保留原 UV 和材质槽。在工具里选择游戏目录、载具和源模型，填写项目保存位置，点击 **生成 Painter 模型**。工具会生成 `Painter.fbx` 或 `Painter.obj`，并创建 `Painter PNG` 文件夹。
 2. **在 Substance 3D Painter 绘制。** 用生成的模型新建工程，启用 **UV 平铺工作流（UDIM）**，选择保留每种材质的 UV 平铺布局，关闭自动展开。画完将带 UDIM 编号的 8 位 PNG 导出到项目的 `Painter PNG` 文件夹。[Painter 设置截图](assets/painter-settings.png)
 3. **导出到游戏。** 回到工具的 **导出涂装** 页，选择 **使用游戏 UserSkins**，填写输出文件夹名并点击 **导出涂装**。工具会自动创建 `UserSkins` 子文件夹，写入 DDS 贴图和 `.blk` 配置。在游戏内刷新自定义涂装并选用它。
 
