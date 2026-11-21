@@ -81,17 +81,6 @@ $game = 'D:\Games\War Thunder'
 - DDS 是 RGBA 8.8.8.8，单层，无 mipmap。导出时会给 UV 岛留出边缘像素，供游戏过滤采样。`--camo-size` 可以单独指定迷彩图尺寸。可再次导出到已有目录，同名的生成文件更新，其他文件保留。
 - `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。
 
-### 验收
-
-`cargo test --locked` 运行无需游戏文件的测试。实车回归测试用两份本地源模型和你指定的游戏目录生成项目，再验证共用原 UV 的面可以导出成两种 Camo 颜色。
-
-```powershell
-$env:CAMO_TEST_GAME_ROOT = 'D:\Games\War Thunder'
-$env:CAMO_TEST_C4DPY = 'D:\Cinema4D\c4dpy.exe'
-$env:CAMO_TEST_LEOPARD = 'D:\Models\Leopard2A8.c4d'
-$env:CAMO_TEST_TYPE90B = 'D:\Models\90B fixed.obj'
-cargo test --release --locked --test real_models -- --ignored --nocapture
-```
 
 Alpha 混合和迷彩比例以游戏内验收为准。
 
