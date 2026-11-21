@@ -1,18 +1,30 @@
 # Camo Translator
 
-Camo Translator 0.2 是 Windows 上的 Rust 桌面工具。它读取你选定的 War Thunder 安装目录，列出可用的地面、航空和舰艇载具，再把 Substance 3D Painter 绘制的贴图回写成游戏的 DDS 和 BLK。支持可缩放迷彩的材质使用游戏原版 UV2。
+> [!WARNING]
+> **本工具会解包《战争雷霆》的本地游戏资源。** 它从你选择的游戏安装目录读取载具模型、UV 和材质数据，用于生成自定义涂装。
 
-## 打开桌面工具
+Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入 `Reused` 对象的零件生成独立 UV 和可导入 Substance 3D Painter 的模型，再通过游戏的 **Camo（迷彩）机制**把各自的底色覆盖到对应零件。Camo 适用于游戏中支持迷彩的材质。
+
+## 三步上手
+
+1. **准备模型。** 把想独立上色的零件合并到一个名为 `Reused` 的对象，保留原 UV 和材质槽。在工具里选择游戏目录、载具和源模型，填写项目保存位置，点击 **生成 Painter 模型**。工具会生成 `Painter.fbx` 或 `Painter.obj`，并创建 `Painter PNG` 文件夹。
+2. **在 Substance 3D Painter 绘制。** 用生成的模型新建工程，启用 **UV 平铺工作流（UDIM）**，选择保留每种材质的 UV 平铺布局，关闭自动展开。画完将带 UDIM 编号的 8 位 PNG 导出到项目的 `Painter PNG` 文件夹。[Painter 设置截图](assets/painter-settings.png)
+3. **导出到游戏。** 回到工具的 **导出涂装** 页，选择 **使用游戏 UserSkins**，填写输出文件夹名并点击 **导出涂装**。工具会自动创建 `UserSkins` 子文件夹，写入 DDS 贴图和 `.blk` 配置。在游戏内刷新自定义涂装并选用它。
+
+## 致谢
+
+感谢 patodois 为 War Thunder 提供资源格式解析和解包支持。 [wt-formats](https://github.com/patodois/wt-formats/tree/main) · [wt-unpack](https://github.com/patodois/wt-unpack)
+
+<details>
+<summary>命令行与进阶说明</summary>
+
+### 打开桌面工具
 
 双击 `target\release\camo-translator.exe`。工具会自动检测游戏目录，也可以在 **准备模型** 中手动浏览。首次识别游戏安装时，工具扫描本机可用的车型并保存目录。以后启动直接读取缓存，游戏资源有变化时自动重新扫描。车型旁的 **重新扫描** 会立即从所选游戏目录更新车型。
 
-在车型栏按中文、英文或游戏编号搜索，选中车型后填写已修完的模型、项目名称和项目保存位置。生成项目后，导出页会自动填入项目下的 `Painter PNG` 和游戏的 `UserSkins`，也可以手动选择这两个目录。处理进度和结果会显示在窗口中。使用窗口底部的 **保存默认路径** 可让下次启动恢复两页的路径。
+在车型栏按中文、英文或游戏编号搜索。使用窗口底部的 **保存默认路径** 可让下次启动恢复两页的路径。
 
-从终端重复操作或运行测试时，使用下方的命令行程序。
-
-## 准备 Painter 模型
-
-在源模型里，把需要独立绘制并交给游戏迷彩图的面放入名为 `Reused` 的网格对象或组，保留它们的原 UV 和材质槽。例如把裙板需要单独画的外表面放入 `Reused`，让烟雾弹等部件继续共用 UV。工具准备 Painter 网格时只为 `Reused` 拆开重叠，普通部件保留共用关系。
+### 准备 Painter 模型
 
 点击 **生成 Painter 模型** 后，工具会读取所选载具的默认隐藏节点，并用顶点位置和原 UV 匹配源模型。你可以按节点查看源对象、材质槽和 UV 预览，在导出前选择 **保留全部面** 或 **移除默认隐藏面**。后者只移除新生成模型中整面均已确认隐藏的多边形。匹配不明确的面会保留。清单以游戏基础配置为准，随选装、预设或损伤切换的隐藏规则另由游戏处理。命令行默认保留，可传入 `--hidden-faces remove` 选择移除。
 
@@ -43,7 +55,7 @@ $game = 'D:\Games\War Thunder'
 
 在 Painter 新建工程时启用 **Use UV Tile workflow**，选择按材质保留 UV Tile 布局，使用生成的 UV。每个对象仍可单独选为 Geometry Mask。C4D 输入需要已保存的多边形模型和可运行的 `c4dpy`。OBJ 输入支持带原 UV 的三角面和四边面。工具用实际原 UV 和位置匹配游戏面，以米为单位，并识别常见的坐标轴方向。
 
-## 回写 DDS 和生成涂装配置
+### 回写 DDS 和生成涂装配置
 
 在 Painter 导出 8-bit PNG，每个 UDIM 保留对应编号。以豹 2A8 的 Body 为例，工具会识别模型名前缀。使用不含模型名前缀的自定义模板也可以直接读取。
 
@@ -66,7 +78,7 @@ $game = 'D:\Games\War Thunder'
 - DDS 是 RGBA 8.8.8.8，单层，无 mipmap。导出时会给 UV 岛留出边缘像素，供游戏过滤采样。`--camo-size` 可以单独指定迷彩图尺寸。可再次导出到已有目录，同名的生成文件更新，其他文件保留。
 - `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。
 
-## 验收
+### 验收
 
 `cargo test --locked` 运行无需游戏文件的测试。实车回归测试用两份本地源模型和你指定的游戏目录生成项目，再验证共用原 UV 的面可以导出成两种 Camo 颜色。
 
@@ -78,4 +90,6 @@ $env:CAMO_TEST_TYPE90B = 'D:\Models\90B fixed.obj'
 cargo test --release --locked --test real_models -- --ignored --nocapture
 ```
 
-把生成的 `.blk` 和同一批次的 DDS 导出到游戏 `UserSkins` 的子目录，刷新涂装列表后选择该涂装。Alpha 混合和迷彩比例以游戏内验收为准。本地项目、测试 DDS 和原始模型都留在本机。每轮按用户的验收结果提交并推送源码。
+Alpha 混合和迷彩比例以游戏内验收为准。
+
+</details>
