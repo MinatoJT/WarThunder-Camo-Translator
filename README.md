@@ -15,6 +15,11 @@ Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入
 
 感谢 patodois 为 War Thunder 提供资源格式解析和解包支持。 [wt-formats](https://github.com/patodois/wt-formats/tree/main) · [wt-unpack](https://github.com/patodois/wt-unpack)
 
+## Contributors
+
+- MinatoJT
+- Codex
+
 <details>
 <summary>命令行与进阶说明</summary>
 
