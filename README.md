@@ -1,4 +1,4 @@
-# Camo Translator
+# <img src="assets/camo-translator.png" width="40" height="40" align="middle" alt="" /> Camo Translator
 
 > [!WARNING]
 > **本工具会解包《战争雷霆》的本地游戏资源。** 它从你选择的游戏安装目录读取载具模型、UV 和材质数据，用于生成自定义涂装。
