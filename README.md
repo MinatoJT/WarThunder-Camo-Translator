@@ -5,7 +5,7 @@
 
 Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入 `Reused` 对象的零件生成独立 UV 和可导入 Substance 3D Painter 的模型，再通过游戏的 **Camo（迷彩）机制**把各自的底色覆盖到对应零件。Camo 适用于游戏中支持迷彩的材质。
 
-[下载首版 Demo（Windows x64）](https://github.com/MinatoJT/Camo-Translator/releases/tag/v0.2.2-demo.1)
+[下载 v0.3（Windows x64）](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.3) · [首版 Demo](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.2.2-demo.1)
 
 ## 三步上手
 

@@ -2,10 +2,10 @@ use super::{
     defaults::{ExportPaths, PreparePaths},
     game_directory,
     job::Job,
+    locale::{Language, Message},
     theme,
     vehicle_picker::VehiclePicker,
 };
-use anyhow::{Result, ensure};
 use camo_translator::{
     bake::{Alpha, CAMO_SCALE_PERCENTS, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions},
     catalog::{is_game_root, user_skins},
@@ -54,19 +54,24 @@ impl PrepareForm {
         }
     }
 
-    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame) {
+    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame, lang: Language) {
         if path_row(
             ui,
             frame,
-            "War Thunder 安装目录",
+            lang.text("War Thunder 安装目录", "War Thunder Installation Folder"),
             &mut self.paths.game,
-            "选择包含 content 文件夹的目录",
+            lang.text(
+                "选择包含 content 文件夹的目录",
+                "Choose the folder that contains the content folder.",
+            ),
             Picker::Folder,
+            lang,
         ) {
             self.detection = None;
         }
         ui.horizontal(|ui| {
-            if ui.small_button("自动检测").clicked() {
+            if theme::compact_button(ui, lang.text("自动检测", "Detect Automatically")).clicked()
+            {
                 let found = game_directory::detect();
                 self.detection = Some(found.is_some());
                 if let Some(folder) = found {
@@ -75,26 +80,35 @@ impl PrepareForm {
             }
             match self.detection {
                 Some(true) => {
-                    ui.label(theme::note("已找到游戏目录"));
+                    ui.label(theme::note(
+                        lang.text("已找到游戏目录", "Game folder found"),
+                    ));
                 }
                 Some(false) => {
-                    ui.label(theme::note("未找到 War Thunder 安装目录，请手动浏览"));
+                    ui.label(theme::note(lang.text(
+                        "未找到 War Thunder 安装目录，请手动浏览",
+                        "War Thunder was not found. Browse to its installation folder.",
+                    )));
                 }
                 None => {}
             }
         });
         ui.add_space(6.0);
         let game = path(&self.paths.game);
-        self.vehicles.show(ui, &game, &mut self.paths.vehicle);
+        self.vehicles.show(ui, &game, &mut self.paths.vehicle, lang);
 
         ui.add_space(6.0);
         if path_row(
             ui,
             frame,
-            "你已经修完的模型（把想要用camo覆盖的部分单独放进一个Reused对象）",
+            lang.text(
+                "你已经修完的模型（把想要用camo覆盖的部分单独放进一个Reused对象）",
+                "Your repaired model (put the parts you want to cover with camo in a separate Reused object)",
+            ),
             &mut self.paths.scene,
-            "选择保存好的 C4D 工程或 OBJ",
+            lang.text("选择保存好的 C4D 工程或 OBJ", "Choose the saved C4D project or OBJ."),
             Picker::Scene,
+            lang,
         ) && self.name.trim().is_empty()
             && path(&self.paths.scene).is_file()
             && let Some(stem) = path(&self.paths.scene).file_stem().and_then(|s| s.to_str())
@@ -106,34 +120,94 @@ impl PrepareForm {
             path_row(
                 ui,
                 frame,
-                "Cinema 4D 脚本程序",
+                lang.text("Cinema 4D 脚本程序", "Cinema 4D Scripting Executable"),
                 &mut self.paths.c4dpy,
-                "选择 Cinema 4D 目录里的 c4dpy.exe",
+                lang.text(
+                    "选择 Cinema 4D 目录里的 c4dpy.exe",
+                    "Choose c4dpy.exe in the Cinema 4D folder.",
+                ),
                 Picker::Cinema,
+                lang,
             );
         }
 
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(8.0);
-        text_row(ui, "项目名称", &mut self.name, "例如 Leopard2A8-v2");
+        text_row(
+            ui,
+            lang.text("项目名称", "Project Name"),
+            &mut self.name,
+            lang.text("例如 Leopard2A8-v2", "e.g. Leopard2A8-v2"),
+        );
         ui.add_space(6.0);
         path_row(
             ui,
             frame,
-            "项目保存位置",
+            lang.text("项目保存位置", "Project Save Location"),
             &mut self.paths.parent,
-            "选择存放新项目的目录",
+            lang.text(
+                "选择存放新项目的目录",
+                "Choose where to save the new project.",
+            ),
             Picker::Folder,
+            lang,
         );
     }
 
-    pub fn show_tutorial(&mut self, ui: &mut Ui) {
-        ui.label(theme::label("1. 把想去除 UV 复用的车体零件用「连接对象 + 删除」合成一个独立对象，命名为 Reused，再交给工具处理。"));
-        ui.add_space(5.0);
-        ui.label(theme::label(
-            "2. 把生成的 Painter 模型导入 Substance Painter，按图设置项目。",
+    pub fn show_tutorial(&mut self, ui: &mut Ui, lang: Language) {
+        tutorial_step(ui, "1.", lang.text(
+            "把想去除 UV 复用的车体零件用「连接对象 + 删除」合成一个独立对象，命名为 Reused，再交给工具处理。",
+            "Use Connect Objects + Delete to combine the vehicle parts you want to paint independently into one object. Name it Reused and let the tool handle the UVs.",
         ));
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+        tutorial_step(ui, "2.", lang.text(
+            "把生成的 Painter 模型导入 Substance Painter，按图设置项目。",
+            "Import the generated Painter model into Substance Painter and use the project settings below.",
+        ));
+        match lang {
+            Language::Chinese => self.painter_screenshot(ui),
+            Language::English => {
+                painter_settings(ui, false);
+                if ui.small_button("View Painter Settings").clicked() {
+                    self.show_screenshot = true;
+                }
+            }
+        }
+        if self.show_screenshot {
+            egui::Window::new(lang.text(
+                "Substance Painter 项目设置",
+                "Substance Painter Project Settings",
+            ))
+            .id(egui::Id::new("painter-settings-window"))
+            .open(&mut self.show_screenshot)
+            .resizable(false)
+            .collapsible(false)
+            .show(ui.ctx(), |ui| match lang {
+                Language::Chinese => {
+                    if let Some(texture) = &self.tutorial {
+                        let available = ui.ctx().content_rect().size() - egui::vec2(50.0, 92.0);
+                        let scale = (available.x / texture.size_vec2().x)
+                            .min(available.y / texture.size_vec2().y)
+                            .clamp(0.3, 1.0);
+                        ui.image((texture.id(), texture.size_vec2() * scale));
+                    }
+                }
+                Language::English => painter_settings(ui, true),
+            });
+        }
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+        tutorial_step(ui, "3.", lang.text(
+            "画完涂装后把 PNG 导出到项目的 Painter PNG 文件夹，再用工具生成涂装 DDS 和 BLK。",
+            "When you finish painting, export the PNGs to the project's Painter PNG folder. Use the tool to generate the skin DDS and BLK files.",
+        ));
+    }
+
+    fn painter_screenshot(&mut self, ui: &mut Ui) {
         const SETTINGS: &[u8] = include_bytes!("../../assets/painter-settings.png");
         if self.tutorial.is_none() {
             self.tutorial = image::load_from_memory(SETTINGS).ok().map(|image| {
@@ -156,39 +230,39 @@ impl PrepareForm {
             {
                 self.show_screenshot = true;
             }
-            if self.show_screenshot {
-                egui::Window::new("Substance Painter 项目设置")
-                    .open(&mut self.show_screenshot)
-                    .resizable(false)
-                    .collapsible(false)
-                    .show(ui.ctx(), |ui| {
-                        let available = ui.ctx().content_rect().size() - egui::vec2(50.0, 92.0);
-                        let scale = (available.x / texture.size_vec2().x)
-                            .min(available.y / texture.size_vec2().y)
-                            .clamp(0.3, 1.0);
-                        ui.image((texture.id(), texture.size_vec2() * scale));
-                    });
-            }
         }
-        ui.add_space(5.0);
-        ui.label(theme::label(
-            "3. 画完涂装后把 PNG 导出到项目的 Painter PNG 文件夹，再用工具生成涂装 DDS 和 BLK。",
-        ));
     }
 
-    pub fn job(&self) -> Result<Job> {
-        let game = directory(&self.paths.game, "请选择 War Thunder 安装目录")?;
+    pub fn job(&self) -> Result<Job, Message> {
+        let game = required_path(
+            &self.paths.game,
+            Path::is_dir,
+            (
+                "请选择 War Thunder 安装目录",
+                "Choose the War Thunder installation folder.",
+            ),
+        )?;
         let vehicle = self.vehicles.selected(&self.paths.vehicle)?.clone();
-        let scene = file(&self.paths.scene, "请选择源模型文件")?;
+        let scene = required_path(
+            &self.paths.scene,
+            Path::is_file,
+            ("请选择源模型文件", "Choose a source model file."),
+        )?;
         let extension = scene.extension().and_then(|v| v.to_str()).unwrap_or("");
-        ensure!(
-            extension.eq_ignore_ascii_case("c4d") || extension.eq_ignore_ascii_case("obj"),
-            "源模型需要是 .c4d 或 .obj 文件"
-        );
+        if !extension.eq_ignore_ascii_case("c4d") && !extension.eq_ignore_ascii_case("obj") {
+            return Err(Message::new(
+                "源模型需要是 .c4d 或 .obj 文件",
+                "The source model must be a .c4d or .obj file.",
+            ));
+        }
         let c4dpy = if self.is_c4d() {
-            Some(file(
+            Some(required_path(
                 &self.paths.c4dpy,
-                "请选择 Cinema 4D 目录里的 c4dpy.exe",
+                Path::is_file,
+                (
+                    "请选择 Cinema 4D 目录里的 c4dpy.exe",
+                    "Choose c4dpy.exe in the Cinema 4D folder.",
+                ),
             )?)
         } else {
             None
@@ -292,37 +366,51 @@ impl ExportForm {
         self.inspect();
     }
 
-    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame, game: &str) {
+    pub fn show(&mut self, ui: &mut Ui, frame: &eframe::Frame, game: &str, lang: Language) {
         path_row(
             ui,
             frame,
-            "已准备的项目",
+            lang.text("已准备的项目", "Prepared Project"),
             &mut self.paths.project,
-            "选择包含 project.json 的目录",
+            lang.text(
+                "选择包含 project.json 的目录",
+                "Choose the folder that contains project.json.",
+            ),
             Picker::Folder,
+            lang,
         );
         self.inspect();
         ui.add_space(6.0);
         path_row(
             ui,
             frame,
-            "Painter PNG 目录",
+            lang.text("Painter PNG 目录", "Painter PNG Folder"),
             &mut self.paths.textures,
-            "选择 Painter 导出的 PNG 所在目录",
+            lang.text(
+                "选择 Painter 导出的 PNG 所在目录",
+                "Choose the folder containing Painter's exported PNGs.",
+            ),
             Picker::Folder,
+            lang,
         );
         ui.add_space(6.0);
         if path_row(
             ui,
             frame,
-            "输出保存位置",
+            lang.text("输出保存位置", "Output Location"),
             &mut self.paths.parent,
-            "自动选用游戏的 UserSkins",
+            lang.text(
+                "自动选用游戏的 UserSkins",
+                "Defaults to the game's UserSkins folder.",
+            ),
             Picker::Folder,
+            lang,
         ) {
             self.paths.auto_parent = Some(false);
         }
-        if ui.small_button("使用游戏 UserSkins").clicked() {
+        if theme::compact_button(ui, lang.text("使用游戏 UserSkins", "Use Game's UserSkins"))
+            .clicked()
+        {
             self.paths.auto_parent = Some(true);
             self.follow_game(game);
             if !is_game_root(&path(game))
@@ -332,10 +420,18 @@ impl ExportForm {
             }
         }
         ui.add_space(6.0);
-        text_row(ui, "输出文件夹名", &mut self.name, "例如 Leopard2A8-skin");
+        text_row(
+            ui,
+            lang.text("输出文件夹名", "Output Folder Name"),
+            &mut self.name,
+            lang.text("例如 Leopard2A8-skin", "e.g. Leopard2A8-skin"),
+        );
         if !self.name.trim().is_empty() && path(&self.paths.parent).join(self.name.trim()).is_dir()
         {
-            ui.label(theme::note("本次生成的同名文件将覆盖现有文件"));
+            ui.label(theme::note(lang.text(
+                "本次生成的同名文件将覆盖现有文件",
+                "Export will overwrite existing files with the same names.",
+            )));
         }
 
         ui.add_space(14.0);
@@ -343,11 +439,25 @@ impl ExportForm {
         ui.add_space(8.0);
 
         ui.columns(2, |cols| {
-            size_field(&mut cols[0], "原纹理尺寸", &mut self.size, false);
-            size_field(&mut cols[1], "Camo 贴图分辨率", &mut self.camo_size, true);
+            size_field(
+                &mut cols[0],
+                "original_size",
+                lang.text("原纹理尺寸", "Original Texture Size"),
+                &mut self.size,
+                None,
+            );
+            size_field(
+                &mut cols[1],
+                "camo_size",
+                lang.text("Camo 贴图分辨率", "Camo Texture Resolution"),
+                &mut self.camo_size,
+                Some(lang.text("同原纹理", "Same as Original")),
+            );
         });
         ui.add_space(5.0);
-        ui.label(theme::label("游戏内 Camo 缩放"));
+        ui.label(theme::label(
+            lang.text("游戏内 Camo 缩放", "In-Game Camo Scale"),
+        ));
         ComboBox::from_id_salt("camo_scale")
             .width(ui.available_width())
             .height(270.0)
@@ -362,137 +472,212 @@ impl ExportForm {
                 }
             });
         if self.alpha == Alpha::FixedWhite {
-            ui.label(theme::note("含 Camo 的涂装会在游戏中固定为所选比例"));
+            ui.label(theme::note(lang.text(
+                "含 Camo 的涂装会在游戏中固定为所选比例",
+                "Skins with Camo use the selected scale in-game.",
+            )));
         }
         ui.add_space(5.0);
-        ui.label(theme::label("原颜色 Alpha"));
+        ui.label(theme::label(
+            lang.text("原颜色 Alpha", "Original Color Alpha"),
+        ));
         ComboBox::from_id_salt("mask_mode")
             .width(ui.available_width())
-            .selected_text(alpha_name(self.alpha))
+            .selected_text(alpha_name(self.alpha, lang))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.alpha,
                     Alpha::CamoWhite,
-                    alpha_name(Alpha::CamoWhite),
+                    alpha_name(Alpha::CamoWhite, lang),
                 );
                 ui.selectable_value(
                     &mut self.alpha,
                     Alpha::FixedWhite,
-                    alpha_name(Alpha::FixedWhite),
+                    alpha_name(Alpha::FixedWhite, lang),
                 );
             });
-        ui.checkbox(&mut self.material, "同时打包材质通道  _n.dds");
+        ui.checkbox(
+            &mut self.material,
+            lang.text(
+                "同时打包材质通道  _n.dds",
+                "Also pack material channels into _n.dds",
+            ),
+        );
     }
 
-    pub fn show_details(&mut self, ui: &mut Ui) {
-        if let Some(brief) = &self.brief {
-            ui.label(theme::label(brief.project.as_str()).size(18.0));
-            let vehicle = if brief.vehicle_name.is_empty() {
-                &brief.model
+    pub fn show_details(&mut self, ui: &mut Ui, lang: Language) {
+        theme::card().inner_margin(0).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if let Some(brief) = &self.brief {
+                theme::section_bar(
+                    ui,
+                    lang.text("导出材质槽", "Export Material Slots"),
+                    |ui| {
+                        if ui.small_button(lang.text("全选", "Select All")).clicked() {
+                            self.slots = brief
+                                .slots
+                                .iter()
+                                .filter(|slot| {
+                                    slot.game_texture.is_some()
+                                        || self.bindings.contains_key(&slot.name)
+                                })
+                                .map(|slot| slot.name.clone())
+                                .collect();
+                        }
+                    },
+                );
             } else {
-                &brief.vehicle_name
-            };
-            ui.label(theme::note(vehicle));
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(theme::label("导出材质槽"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("全选").clicked() {
-                        self.slots = brief
-                            .slots
-                            .iter()
-                            .filter(|slot| {
-                                slot.game_texture.is_some()
-                                    || self.bindings.contains_key(&slot.name)
-                            })
-                            .map(|slot| slot.name.clone())
-                            .collect();
-                    }
-                });
-            });
-            for slot in &brief.slots {
-                let mut target = self
-                    .bindings
-                    .get(&slot.name)
-                    .cloned()
-                    .or_else(|| slot.game_texture.clone())
-                    .unwrap_or_default();
-                if !brief.texture_candidates.is_empty() {
-                    let previous = target.clone();
-                    ComboBox::from_id_salt(("texture_binding", &slot.name))
-                        .width(ui.available_width())
-                        .selected_text(if target.is_empty() {
-                            "选择游戏贴图"
-                        } else {
-                            &target
-                        })
-                        .show_ui(ui, |ui| {
-                            for binding in &brief.texture_candidates {
-                                ui.selectable_value(
-                                    &mut target,
-                                    binding.color.clone(),
-                                    &binding.color,
-                                );
-                            }
-                        });
-                    if target != previous {
-                        self.bindings.insert(slot.name.clone(), target.clone());
-                        self.slots.insert(slot.name.clone());
-                    }
-                }
-                let mut selected = self.slots.contains(&slot.name);
-                if ui
-                    .add_enabled(
-                        !target.is_empty(),
-                        egui::Checkbox::new(&mut selected, &slot.name),
-                    )
-                    .changed()
-                {
-                    if selected {
-                        self.slots.insert(slot.name.clone());
-                    } else {
-                        self.slots.remove(&slot.name);
-                    }
-                }
-                if !slot.tiles.is_empty() {
-                    let tiles = slot
-                        .tiles
-                        .iter()
-                        .map(u16::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    ui.label(theme::note(tiles));
-                }
+                theme::section_bar(ui, lang.text("导出内容", "Export Contents"), |_| {});
             }
-        } else {
-            ui.label(theme::label("导出内容").size(18.0));
-        }
 
-        ui.add_space(11.0);
-        detail(ui, "_c.dds", "颜色回写到原 UV");
-        detail(ui, "Reused 对象", "标记区域使用游戏 UV2 的迷彩图和单独底图");
-        if self.alpha == Alpha::FixedWhite {
-            detail(ui, ".blk", "与 DDS 一起放入游戏的 UserSkins 子目录");
-        }
-        if self.material {
-            detail(ui, "_n.dds", "读取 Metallic、Roughness 和 Normal 的 PNG");
-        }
+            egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.spacing_mut().interact_size.y = 26.0;
+                if let Some(brief) = &self.brief {
+                    ui.label(theme::label(brief.project.as_str()).size(18.0));
+                    let vehicle = if lang == Language::English || brief.vehicle_name.is_empty() {
+                        &brief.model
+                    } else {
+                        &brief.vehicle_name
+                    };
+                    ui.label(theme::note(vehicle));
+                    for slot in &brief.slots {
+                        ui.separator();
+                        let mut target = self
+                            .bindings
+                            .get(&slot.name)
+                            .cloned()
+                            .or_else(|| slot.game_texture.clone())
+                            .unwrap_or_default();
+                        let mut selected = self.slots.contains(&slot.name);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if !slot.tiles.is_empty() {
+                                let tiles = slot
+                                    .tiles
+                                    .iter()
+                                    .map(u16::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                ui.label(theme::note(tiles));
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                    if ui
+                                        .add_enabled(
+                                            !target.is_empty(),
+                                            egui::Checkbox::new(
+                                                &mut selected,
+                                                theme::label(slot.name.as_str()),
+                                            ),
+                                        )
+                                        .on_hover_text(&slot.name)
+                                        .changed()
+                                    {
+                                        if selected {
+                                            self.slots.insert(slot.name.clone());
+                                        } else {
+                                            self.slots.remove(&slot.name);
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                        if !brief.texture_candidates.is_empty() {
+                            let previous = target.clone();
+                            ui.indent(("texture_binding_indent", &slot.name), |ui| {
+                                ComboBox::from_id_salt(("texture_binding", &slot.name))
+                                    .width(ui.available_width())
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selected_text(if target.is_empty() {
+                                        lang.text("选择游戏贴图", "Choose Game Texture")
+                                    } else {
+                                        &target
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for binding in &brief.texture_candidates {
+                                            ui.selectable_value(
+                                                &mut target,
+                                                binding.color.clone(),
+                                                &binding.color,
+                                            );
+                                        }
+                                    });
+                            });
+                            if target != previous {
+                                self.bindings.insert(slot.name.clone(), target);
+                                self.slots.insert(slot.name.clone());
+                            }
+                        }
+                    }
+                    ui.add_space(5.0);
+                    ui.separator();
+                }
+                detail(
+                    ui,
+                    "_c.dds",
+                    lang.text("颜色回写到原 UV", "Write color to the original UVs."),
+                );
+                detail(
+                    ui,
+                    lang.text("Reused 对象", "Reused Object"),
+                    lang.text(
+                        "标记区域使用游戏 UV2 的迷彩图和单独底图",
+                        "Marked areas use the game's UV2 camouflage and a separate base texture.",
+                    ),
+                );
+                if self.alpha == Alpha::FixedWhite {
+                    detail(
+                        ui,
+                        ".blk",
+                        lang.text(
+                            "与 DDS 一起放入游戏的 UserSkins 子目录",
+                            "Place it with the DDS files in a game UserSkins subfolder.",
+                        ),
+                    );
+                }
+                if self.material {
+                    detail(
+                        ui,
+                        "_n.dds",
+                        lang.text(
+                            "读取 Metallic、Roughness 和 Normal 的 PNG",
+                            "Read the Metallic, Roughness, and Normal PNGs.",
+                        ),
+                    );
+                }
+            });
+        });
     }
 
-    pub fn job(&self) -> Result<Job> {
-        let project = directory(&self.paths.project, "请选择包含 project.json 的项目目录")?;
-        ensure!(
-            project.join("project.json").is_file(),
-            "所选项目目录缺少 project.json"
-        );
-        let textures = directory(&self.paths.textures, "请选择 Painter PNG 目录")?;
+    pub fn job(&self) -> Result<Job, Message> {
+        let project = required_path(
+            &self.paths.project,
+            Path::is_dir,
+            (
+                "请选择包含 project.json 的项目目录",
+                "Choose the project folder that contains project.json.",
+            ),
+        )?;
+        if !project.join("project.json").is_file() {
+            return Err(Message::new(
+                "所选项目目录缺少 project.json",
+                "The selected project folder is missing project.json.",
+            ));
+        }
+        let textures = required_path(
+            &self.paths.textures,
+            Path::is_dir,
+            ("请选择 Painter PNG 目录", "Choose the Painter PNG folder."),
+        )?;
         let (_, out) = output(&self.paths.parent, &self.name, true)?;
-        ensure!(
-            self.brief.is_none() || !self.slots.is_empty(),
-            "请至少选择一个材质槽"
-        );
+        if self.brief.is_some() && self.slots.is_empty() {
+            return Err(Message::new(
+                "请至少选择一个材质槽",
+                "Select at least one material slot.",
+            ));
+        }
         let options = ExportOptions {
             size: self.size,
             camo_size: if self.camo_size == 0 {
@@ -548,19 +733,64 @@ impl ExportForm {
     }
 }
 
-fn size_field(ui: &mut Ui, label: &str, value: &mut u32, allow_same: bool) {
+fn tutorial_step(ui: &mut Ui, number: &str, text: &str) {
+    ui.horizontal_top(|ui| {
+        egui::Frame::new()
+            .fill(theme::ACCENT)
+            .inner_margin(egui::Margin::symmetric(6, 2))
+            .show(ui, |ui| ui.label(theme::label(number)));
+        ui.add(egui::Label::new(theme::label(text)).wrap());
+    });
+}
+
+fn painter_settings(ui: &mut Ui, expanded: bool) {
+    theme::card()
+        .fill(theme::BACK)
+        .inner_margin(9)
+        .show(ui, |ui| {
+            if expanded {
+                ui.set_min_width(335.0);
+            } else {
+                ui.set_min_width(ui.available_width());
+            }
+            setting(ui, "Document Resolution", "4096");
+            setting(ui, "Normal Map Format", "DirectX");
+            if expanded {
+                setting(ui, "Compute Tangent Space Per Fragment", "Off");
+            }
+            setting(ui, "UV Tile Workflow", "On");
+            ui.label(theme::note(
+                "Preserve UV Tile layout per material and enable painting across tiles.",
+            ));
+            if expanded {
+                setting(ui, "Import Cameras", "On");
+                setting(ui, "Auto-Unwrap", "Off");
+            }
+        });
+}
+
+fn setting(ui: &mut Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(theme::note(label));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(theme::label(value).size(13.0));
+        });
+    });
+}
+
+fn size_field(ui: &mut Ui, id: &str, label: &str, value: &mut u32, same_size: Option<&str>) {
     ui.label(theme::label(label));
     let selected = if *value == 0 {
-        "同原纹理".to_owned()
+        same_size.unwrap_or_default().to_owned()
     } else {
         format!("{value} × {value}")
     };
-    ComboBox::from_id_salt(label)
-        .width(ui.available_width())
+    ComboBox::from_id_salt(id)
+        .width(ui.available_width() - 2.0)
         .selected_text(selected)
         .show_ui(ui, |ui| {
-            if allow_same {
-                ui.selectable_value(value, 0, "同原纹理");
+            if let Some(same_size) = same_size {
+                ui.selectable_value(value, 0, same_size);
             }
             for size in SIZES {
                 ui.selectable_value(value, size, format!("{size} × {size}"));
@@ -576,43 +806,59 @@ fn path(value: &str) -> PathBuf {
     PathBuf::from(value.trim().trim_matches('"'))
 }
 
-fn directory(value: &str, message: &str) -> Result<PathBuf> {
+fn required_path(
+    value: &str,
+    exists: impl FnOnce(&Path) -> bool,
+    (chinese, english): (&str, &str),
+) -> Result<PathBuf, Message> {
     let p = path(value);
-    ensure!(p.is_dir(), "{message}");
-    Ok(p)
+    if exists(&p) {
+        Ok(p)
+    } else {
+        Err(Message::new(chinese, english))
+    }
 }
 
-fn file(value: &str, message: &str) -> Result<PathBuf> {
-    let p = path(value);
-    ensure!(p.is_file(), "{message}");
-    Ok(p)
-}
-
-fn output(parent: &str, name: &str, allow_existing: bool) -> Result<(String, PathBuf)> {
+fn output(parent: &str, name: &str, allow_existing: bool) -> Result<(String, PathBuf), Message> {
     let parent = path(parent);
     let name = name.trim();
-    ensure!(!parent.as_os_str().is_empty(), "请选择输出保存位置");
-    ensure!(!name.is_empty(), "请输入文件夹名称");
+    if parent.as_os_str().is_empty() {
+        return Err(Message::new(
+            "请选择输出保存位置",
+            "Choose an output location.",
+        ));
+    }
+    if name.is_empty() {
+        return Err(Message::new("请输入文件夹名称", "Enter a folder name."));
+    }
     let mut components = Path::new(name).components();
-    ensure!(
-        matches!(components.next(), Some(Component::Normal(_)))
-            && components.next().is_none()
-            && !name.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
-            && !name.ends_with('.'),
-        "请填写一个有效的文件夹名称"
-    );
+    if !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+        || name.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
+        || name.ends_with('.')
+    {
+        return Err(Message::new(
+            "请填写一个有效的文件夹名称",
+            "Enter a valid folder name.",
+        ));
+    }
     let target = parent.join(name);
-    ensure!(
-        !target.exists() || (allow_existing && target.is_dir()),
-        "输出位置不可用，请换一个名称"
-    );
+    if target.exists() && !(allow_existing && target.is_dir()) {
+        return Err(Message::new(
+            "输出位置不可用，请换一个名称",
+            "The output location is unavailable. Choose a different name.",
+        ));
+    }
     Ok((name.to_owned(), target))
 }
 
-fn alpha_name(alpha: Alpha) -> &'static str {
+fn alpha_name(alpha: Alpha, lang: Language) -> &'static str {
     match alpha {
-        Alpha::CamoWhite => "Reused 遮罩为白（仅 DDS）",
-        Alpha::FixedWhite => "固定层为白（DDS 和 BLK）",
+        Alpha::CamoWhite => lang.text("Reused 遮罩为白（仅 DDS）", "White Reused Mask (DDS Only)"),
+        Alpha::FixedWhite => lang.text(
+            "固定层为白（DDS 和 BLK）",
+            "White Fixed Layer (DDS and BLK)",
+        ),
     }
 }
 
@@ -645,7 +891,9 @@ fn text_row(ui: &mut Ui, label: &str, value: &mut String, hint: &str) {
     let label = ui.label(theme::label(label));
     ui.add_sized(
         [ui.available_width(), 33.0],
-        TextEdit::singleline(value).hint_text(hint),
+        TextEdit::singleline(value)
+            .hint_text(hint)
+            .vertical_align(egui::Align::Center),
     )
     .labelled_by(label.id);
 }
@@ -657,39 +905,49 @@ fn path_row(
     value: &mut String,
     hint: &str,
     picker: Picker,
+    lang: Language,
 ) -> bool {
-    let field = ui.label(theme::label(label));
-    ui.horizontal(|ui| {
-        const BUTTON: f32 = 77.0;
-        let width = (ui.available_width() - ui.spacing().item_spacing.x - BUTTON).max(80.0);
-        let edited = ui
-            .add_sized([width, 33.0], TextEdit::singleline(value).hint_text(hint))
-            .labelled_by(field.id)
-            .changed();
-        if !ui
-            .add_sized([BUTTON, 33.0], egui::Button::new("浏览…"))
-            .clicked()
-        {
-            return edited;
-        }
-        let mut dialog = rfd::FileDialog::new().set_parent(frame).set_title(label);
-        let current = path(value);
-        if let Some(folder) = current.ancestors().find(|p| p.is_dir()) {
-            dialog = dialog.set_directory(folder);
-        }
-        let selected = match picker {
-            Picker::Folder => dialog.pick_folder(),
-            Picker::Scene => dialog.add_filter("C4D / OBJ", &["c4d", "obj"]).pick_file(),
-            Picker::Cinema => dialog.add_filter("c4dpy.exe", &["exe"]).pick_file(),
-        };
-        if let Some(chosen) = selected {
-            *value = path_text(&chosen);
-            true
-        } else {
-            edited
-        }
-    })
-    .inner
+    let field = ui.add(egui::Label::new(theme::label(label)).wrap());
+    let (row, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 33.0), egui::Sense::hover());
+    let browse = egui::Rect::from_min_size(
+        row.right_top() - egui::vec2(90.0, 0.0),
+        egui::vec2(90.0, 33.0),
+    );
+    let entry =
+        egui::Rect::from_min_max(row.left_top(), browse.left_bottom() - egui::vec2(10.0, 0.0));
+    let edited = ui
+        .place(
+            entry,
+            TextEdit::singleline(value)
+                .id_salt(field.id)
+                .hint_text(hint)
+                .vertical_align(egui::Align::Center),
+        )
+        .labelled_by(field.id)
+        .changed();
+    if !ui
+        .place(browse, egui::Button::new(lang.text("浏览…", "Browse…")))
+        .clicked()
+    {
+        return edited;
+    }
+    let mut dialog = rfd::FileDialog::new().set_parent(frame).set_title(label);
+    let current = path(value);
+    if let Some(folder) = current.ancestors().find(|p| p.is_dir()) {
+        dialog = dialog.set_directory(folder);
+    }
+    let selected = match picker {
+        Picker::Folder => dialog.pick_folder(),
+        Picker::Scene => dialog.add_filter("C4D / OBJ", &["c4d", "obj"]).pick_file(),
+        Picker::Cinema => dialog.add_filter("c4dpy.exe", &["exe"]).pick_file(),
+    };
+    if let Some(chosen) = selected {
+        *value = path_text(&chosen);
+        true
+    } else {
+        edited
+    }
 }
 
 #[cfg(test)]

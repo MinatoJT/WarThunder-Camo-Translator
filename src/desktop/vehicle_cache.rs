@@ -1,3 +1,4 @@
+use super::locale::Message;
 use anyhow::{Context, Result};
 use camo_translator::catalog::Catalog;
 use serde::{Deserialize, Serialize};
@@ -39,20 +40,24 @@ struct CachedCatalog {
 
 pub(super) struct LoadedCatalog {
     pub catalog: Catalog,
-    pub notice: Option<String>,
+    pub notice: Option<Message>,
 }
 
-pub(super) fn load(game: &Path, refresh: bool) -> Result<LoadedCatalog> {
-    let game = game
-        .canonicalize()
-        .context("无法打开 War Thunder 安装目录")?;
-    match super::defaults::folder() {
+pub(super) fn load(game: &Path, refresh: bool) -> Result<LoadedCatalog, Message> {
+    let game = game.canonicalize().map_err(|error| {
+        Message::new(
+            format!("无法打开 War Thunder 安装目录：{error}"),
+            format!("Could not open the War Thunder installation folder: {error}"),
+        )
+    })?;
+    let loaded = match super::defaults::folder() {
         Ok(folder) => open_cached(&game, &folder, refresh, Catalog::scan),
-        Err(error) => Ok(LoadedCatalog {
-            catalog: Catalog::scan(&game)?,
-            notice: Some(format!("车型目录未缓存（{error:#}）")),
+        Err(error) => Catalog::scan(&game).map(|catalog| LoadedCatalog {
+            catalog,
+            notice: Some(cache_missing(error)),
         }),
-    }
+    };
+    loaded.map_err(|error| Message::diagnostic(format!("{error:#}")))
 }
 
 fn open_cached(
@@ -89,7 +94,12 @@ fn open_cached(
             return match saved {
                 Some(saved) => Ok(LoadedCatalog {
                     catalog: saved.catalog,
-                    notice: Some(format!("扫描失败，显示上次保存的车型目录（{error:#}）")),
+                    notice: Some(Message::new(
+                        format!("扫描失败，显示上次保存的车型目录（{error:#}）"),
+                        format!(
+                            "Scan failed. Showing the previously saved vehicle catalog ({error:#})."
+                        ),
+                    )),
                 }),
                 None => Err(error),
             };
@@ -104,9 +114,7 @@ fn open_cached(
                 inputs,
                 catalog,
             };
-            let notice = save(folder, &path, &fresh)
-                .err()
-                .map(|error| format!("车型目录未缓存（{error:#}）"));
+            let notice = save(folder, &path, &fresh).err().map(cache_missing);
             Ok(LoadedCatalog {
                 catalog: fresh.catalog,
                 notice,
@@ -114,13 +122,23 @@ fn open_cached(
         }
         (Err(error), _) | (_, Err(error)) => Ok(LoadedCatalog {
             catalog,
-            notice: Some(format!("车型目录未缓存（{error:#}）")),
+            notice: Some(cache_missing(error)),
         }),
         _ => Ok(LoadedCatalog {
             catalog,
-            notice: Some("游戏文件正在更新，更新完毕后可重新扫描".into()),
+            notice: Some(Message::new(
+                "游戏文件正在更新，更新完毕后可重新扫描",
+                "The game files are updating. Rescan when the update finishes.",
+            )),
         }),
     }
+}
+
+fn cache_missing(error: anyhow::Error) -> Message {
+    Message::new(
+        format!("车型目录未缓存（{error:#}）"),
+        format!("The vehicle catalog was not cached ({error:#})."),
+    )
 }
 
 fn input_stamps(game: &Path) -> Result<Vec<Option<FileStamp>>> {

@@ -1,3 +1,4 @@
+use super::locale::Message;
 use anyhow::{Context, Result};
 use camo_translator::{
     bake::{self, ExportOptions},
@@ -34,13 +35,13 @@ pub enum Job {
 }
 
 pub enum Event {
-    Step(String),
-    Note(String),
+    Step(Message),
+    Note(Message),
     ReviewHiddenFaces {
         report: VisibilityReport,
         reply: Sender<Option<HiddenFaces>>,
     },
-    Finished(Result<Option<PathBuf>>),
+    Finished(Result<Option<PathBuf>, Message>),
 }
 
 impl Job {
@@ -86,7 +87,7 @@ impl Job {
             .name("camo-translation".to_owned())
             .spawn(move || {
                 let progress = |step: Progress<'_>| {
-                    let text = chinese(step);
+                    let text = progress_message(step);
                     let event = if matches!(
                         step,
                         Progress::ReusedUvWarning { .. } | Progress::CamoUvConflict(_)
@@ -100,7 +101,10 @@ impl Job {
                 };
                 let review = |report: &VisibilityReport| {
                     if report.default_hidden_nodes.is_empty() {
-                        let _ = tx.send(Event::Note("游戏配置未声明默认隐藏节点。".into()));
+                        let _ = tx.send(Event::Note(Message::new(
+                            "游戏配置未声明默认隐藏节点。",
+                            "The game configuration has no default hidden nodes.",
+                        )));
                         return Ok(Some(HiddenFaces::Keep));
                     }
                     let (reply, answer) = mpsc::channel();
@@ -111,18 +115,25 @@ impl Job {
                     .map_err(|_| anyhow::anyhow!("隐藏面检查窗口已关闭"))?;
                     ctx.request_repaint();
                     let choice = answer.recv().context("隐藏面检查窗口已关闭")?;
+                    let removed = report.removable_triangles;
                     let detail = match choice {
-                        Some(HiddenFaces::Keep) => "已保留全部源模型面。".to_owned(),
-                        Some(HiddenFaces::Remove) => format!(
-                            "已从 Painter 模型移除 {} 个默认隐藏三角面。",
-                            report.removable_triangles
+                        Some(HiddenFaces::Keep) => {
+                            Message::new("已保留全部源模型面。", "Kept all source model faces.")
+                        }
+                        Some(HiddenFaces::Remove) => Message::new(
+                            format!("已从 Painter 模型移除 {removed} 个默认隐藏三角面。"),
+                            format!(
+                                "Removed {removed} default-hidden triangles from the Painter model."
+                            ),
                         ),
                         None => return Ok(None),
                     };
                     let _ = tx.send(Event::Note(detail));
                     Ok(choice)
                 };
-                let result = self.run(progress, review);
+                let result = self
+                    .run(progress, review)
+                    .map_err(|error| Message::diagnostic(format!("{error:#}")));
                 let _ = tx.send(Event::Finished(result));
                 ctx.request_repaint();
             })?;
@@ -130,8 +141,8 @@ impl Job {
     }
 }
 
-fn chinese(progress: Progress<'_>) -> String {
-    match progress {
+fn progress_message(progress: Progress<'_>) -> Message {
+    let chinese = match progress {
         Progress::ReadMesh => "读取源模型与材质槽".into(),
         Progress::ScanDefaultHiddenFaces => "读取游戏默认隐藏节点".into(),
         Progress::DefaultHiddenFaces { nodes, removable } => {
@@ -155,5 +166,24 @@ fn chinese(progress: Progress<'_>) -> String {
             format!("{pixels} 个迷彩像素同时收到不同颜色，详见导出报告")
         }
         Progress::WriteCamouflage => "保存涂装与导出报告".into(),
-    }
+    };
+    let english = match progress {
+        Progress::ReadMesh => "Reading the source model and material slots".into(),
+        Progress::MatchCamouflage(_) => {
+            "Matching the game model, materials, and camouflage UVs".into()
+        }
+        Progress::WritePainterMesh => "Saving the Painter model and project".into(),
+        Progress::ReusedUvWarning {
+            slot,
+            mixed,
+            missing,
+        } => format!(
+            "{slot}: {mixed} Reused texels share original UVs with ordinary objects, and {missing} lack UV2."
+        ),
+        Progress::CamoUvConflict(pixels) => format!(
+            "{pixels} camouflage texels received different colors. See the export report for details."
+        ),
+        _ => progress.to_string(),
+    };
+    Message::new(chinese, english)
 }

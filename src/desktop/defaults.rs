@@ -1,3 +1,4 @@
+use super::locale::Language;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -28,6 +29,7 @@ pub(super) struct ExportPaths {
 pub(super) struct Defaults {
     pub prepare: PreparePaths,
     pub export: ExportPaths,
+    pub language: Language,
 }
 
 pub(super) fn folder() -> Result<PathBuf> {
@@ -61,6 +63,12 @@ impl Defaults {
             .with_context(|| format!("保存 {}", path.display()))?;
         Ok(())
     }
+
+    pub fn save_language(path: &Path, language: Language) -> Result<()> {
+        let mut saved = Self::load(path)?;
+        saved.language = language;
+        saved.save(path)
+    }
 }
 
 #[cfg(test)]
@@ -71,12 +79,22 @@ mod tests {
     fn saved_paths_can_be_restored_and_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"prepare":{"vehicle":"jp_type_90b"},"export":{}}"#,
+        )
+        .unwrap();
         let mut paths = Defaults::load(&path).unwrap();
-        paths.prepare.vehicle = "jp_type_90b".into();
+        assert_eq!(paths.language, Language::Chinese);
+        assert_eq!(paths.prepare.vehicle, "jp_type_90b");
         paths.prepare.game = r"D:\Steam Library\steamapps\common\War Thunder".into();
         paths.prepare.scene = r"D:\模型\90B fixed.obj".into();
         paths.export.textures = r"D:\贴图\Painter PNG".into();
         paths.save(&path).unwrap();
+        assert_eq!(Defaults::load(&path).unwrap(), paths);
+
+        Defaults::save_language(&path, Language::English).unwrap();
+        paths.language = Language::English;
         assert_eq!(Defaults::load(&path).unwrap(), paths);
         paths.export.parent = r"D:\涂装\UserSkins".into();
         paths.save(&path).unwrap();
