@@ -8,6 +8,7 @@ Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入
 [下载 v0.4（Windows x64）](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.4) 
 
 **如何贡献本项目：**
+
 **1.Fork本仓库**
 
 **2.添加bug修复或额外功能**
