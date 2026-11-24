@@ -25,6 +25,7 @@ pub enum Progress<'a> {
         slot: &'a str,
         tiles: usize,
     },
+    AdjustColors(&'a str),
     ReusedUvWarning {
         slot: &'a str,
         mixed: usize,
@@ -60,6 +61,7 @@ impl fmt::Display for Progress<'_> {
             Self::ReprojectTextures { slot, tiles } => {
                 write!(f, "Reprojecting {slot} from {tiles} Painter tiles")
             }
+            Self::AdjustColors(texture) => write!(f, "Adjusting colors for {texture}"),
             Self::ReusedUvWarning {
                 slot,
                 mixed,

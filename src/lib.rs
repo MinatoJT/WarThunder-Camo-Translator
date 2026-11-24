@@ -2,6 +2,7 @@ pub mod atlas;
 pub mod bake;
 pub mod catalog;
 pub mod cli;
+pub mod color_adjustment;
 pub mod dds;
 mod fbx;
 mod game;

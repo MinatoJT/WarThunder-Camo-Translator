@@ -5,7 +5,7 @@
 
 Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入 `Reused` 对象的零件生成独立 UV 和可导入 Substance 3D Painter 的模型，再通过游戏的 **Camo（迷彩）机制**把各自的底色覆盖到对应零件。Camo 适用于游戏中支持迷彩的材质。
 
-[下载 v0.3（Windows x64）](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.3) · [首版 Demo](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.2.2-demo.1)
+[下载 v0.4（Windows x64）](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.4) · [首版 Demo](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.2.2-demo.1)
 
 ## 三步上手
 
@@ -76,10 +76,18 @@ $game = 'D:\Games\War Thunder'
 
 - 默认回写所有能对应游戏贴图的材质槽。可重复传入 `--slot` 只导出其中几个。90B OBJ 里的 Body 槽叫 `Body_1`。没有自动对应的材质槽可在导出页选择游戏贴图，命令行使用 `--binding 源槽=游戏贴图`。多个槽对应同一张游戏贴图时会合并回写。可用 `--textures` 指定其他 PNG 目录。
 - 加 `--material` 才读取后三张图并输出 `_n.dds`。通道固定为 R = 255 − Roughness、G = Normal.G、B = Metallic、A = Normal.R。
+- 在导出页勾选 **导出时调整色彩** 可使用 DDS Builder v2.1 的 **完整补偿 · v2** 或 **A3 + 暗部补偿**。补偿应用于固定色和 Camo DDS 的 RGB，默认关闭。使用 Painter 原始 BaseColor PNG，工具会识别 DDS Builder 写入的补偿标记，避免重复调整。命令行使用 `--color-adjustment` 选择完整补偿，或用 `--color-adjustment a3-shadows` 选择 A3 方案。
 - 在导出页通过 **游戏内 Camo 缩放** 选择游戏的 20% 到 200% 档位，默认 200%。工具按这个比例回写迷彩图，同时把比例写入 `.blk`。游戏加载含 Camo 的涂装时会自动固定为所选比例。命令行使用 `--camo-scale` 设置百分比。
 - 默认生成车型对应的 `.blk`。需要 Camo 的材质槽包含固定覆盖图 `_c.dds` 和游戏底图 `_camo_base.dds`。`_c.dds` 的 Alpha 决定固定色和迷彩的交界。`_camo_base.dds` 在 UV 岛和扩边内的 Alpha 统一为 255，让游戏对交界采样时底层保持连续。普通固定材质使用其原始贴图名生成替换配置。没有可缩放迷彩的材质使用固定贴图，复用的原 UV 会继续共用颜色。已有自定义配置时可用 `--alpha camo-white` 导出白色的 Reused 遮罩。
+- 在输出 DDS 和 BLK 时可勾选 **去除载具贴纸**，命令行使用 `--remove-vehicle-decals`。对使用 Camo 遮罩的材质，`set_tex` 图的 Alpha 为全黑，`replace_tex` 的底图在固定色区域为黑色，在使用 Camo 的 Reused 区域及其 UV 扩边为白色。纯固定色材质的两条指令共用一张全黑 Alpha 的 DDS。工具同时从 Painter 的 Metallic、Roughness 和 Normal PNG 生成对应的 `_n.dds` 并写入替换项。[战争雷霆官方涂装说明](https://wiki.warthunder.com/cdk/creation_camo#work-with-blk)
 - DDS 是 RGBA 8.8.8.8，单层，无 mipmap。导出时会给 UV 岛留出边缘像素，供游戏过滤采样。`--camo-size` 可以单独指定迷彩图尺寸。可再次导出到已有目录，同名的生成文件更新，其他文件保留。
 - `Reused` 和普通对象共用的原 UV 像素使用普通对象的固定贴图，界面和 `export-report.json` 会列出这些冲突。报告也会列出 `Reused` 缺失游戏 UV2 的像素，以及迷彩图中收到不同颜色的像素。
+
+色彩补偿表随程序提供，可在维护配方时使用 DDS Builder v2.1 的 Python 环境重新生成。
+
+```powershell
+python tools/generate_color_adjustment_luts.py 'D:\Tools\DDS_Builder_v2.1'
+```
 
 
 </details>

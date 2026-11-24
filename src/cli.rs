@@ -1,6 +1,7 @@
 use crate::{
     bake::{self, Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions},
     catalog::Catalog,
+    color_adjustment::ColorAdjustment,
     prepare::{self, PrepareRequest},
     visibility::HiddenFaces,
 };
@@ -75,6 +76,12 @@ enum Commands {
         /// Read Metallic, Roughness and Normal PNGs and export packed _n textures.
         #[arg(long)]
         material: bool,
+        /// Replace the base color and normal of masked vehicle materials to suppress decals.
+        #[arg(long)]
+        remove_vehicle_decals: bool,
+        /// Apply a DDS Builder color adjustment to the exported BaseColor RGB.
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "full-v2")]
+        color_adjustment: Option<ColorAdjustment>,
         /// Fixed-white also writes the War Thunder .blk. Camo-white exports DDS only.
         #[arg(long, value_enum, default_value = "fixed-white")]
         alpha: Alpha,
@@ -149,6 +156,8 @@ pub fn run() -> Result<()> {
             camo_size,
             camo_scale_percent,
             material,
+            remove_vehicle_decals,
+            color_adjustment,
             alpha,
         } => {
             let bindings = bindings
@@ -165,6 +174,8 @@ pub fn run() -> Result<()> {
                 camo_size: camo_size.unwrap_or(size),
                 camo_scale_percent,
                 material,
+                remove_vehicle_decals,
+                color_adjustment,
                 alpha,
                 slots,
                 bindings,

@@ -1,3 +1,4 @@
+use crate::color_adjustment::{ColorAdjustment, ColorTable, read_painter_color};
 use crate::dds::{material_pixel, write_rgba};
 use crate::materials::{SkinProfile, TextureBinding};
 use crate::progress::Progress;
@@ -23,7 +24,7 @@ pub const DEFAULT_CAMO_SCALE_PERCENT: u16 = 200;
 pub enum Alpha {
     /// White where a shared original UV is redirected to camouflage.
     CamoWhite,
-    /// White where fixed color covers camouflage in set_tex.
+    /// Generate a BLK with a white fixed-color mask by default.
     FixedWhite,
 }
 
@@ -32,6 +33,8 @@ pub struct ExportOptions {
     pub camo_size: u32,
     pub camo_scale_percent: u16,
     pub material: bool,
+    pub remove_vehicle_decals: bool,
+    pub color_adjustment: Option<ColorAdjustment>,
     pub alpha: Alpha,
     pub slots: Vec<String>,
     pub bindings: BTreeMap<String, String>,
@@ -41,6 +44,8 @@ pub struct ExportOptions {
 struct BaseReport {
     #[serde(skip)]
     overlay: bool,
+    #[serde(skip)]
+    remove_vehicle_decals: bool,
     slot: String,
     file: String,
     material_file: Option<String>,
@@ -57,6 +62,10 @@ struct Report {
     camo_size: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     camo_scale_percent: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color_adjustment: Option<ColorAdjustment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove_vehicle_decals: Option<bool>,
     alpha: Alpha,
     skin_config: Option<String>,
     camo_pixels: usize,
@@ -128,7 +137,13 @@ impl<'a> PainterPngs<'a> {
         Ok(first.map(PathBuf::as_path))
     }
 
-    fn load_map(&self, slot: &str, tile: u16, channel: &str) -> Result<RgbaImage> {
+    fn load_map(
+        &self,
+        slot: &str,
+        tile: u16,
+        channel: &str,
+        for_adjustment: bool,
+    ) -> Result<RgbaImage> {
         let tiled = format!("{slot}_{channel}.{tile}.png");
         let mut path = self.find(&tiled)?;
         if path.is_none() && tile == 1001 {
@@ -141,6 +156,10 @@ impl<'a> PainterPngs<'a> {
             )
         })?;
         let loader = ImageReader::open(path).with_context(|| format!("打开 {}", path.display()))?;
+        if for_adjustment {
+            return read_painter_color(loader.into_inner())
+                .with_context(|| format!("BaseColor PNG {}", path.display()));
+        }
         Ok(loader
             .decode()
             .with_context(|| format!("解码 {}", path.display()))?
@@ -149,13 +168,19 @@ impl<'a> PainterPngs<'a> {
 }
 
 impl Tile {
-    fn load(pngs: &PainterPngs<'_>, slot: &str, tile: u16, material: bool) -> Result<Self> {
-        let base = pngs.load_map(slot, tile, "BaseColor")?;
+    fn load(
+        pngs: &PainterPngs<'_>,
+        slot: &str,
+        tile: u16,
+        material: bool,
+        color_adjustment: bool,
+    ) -> Result<Self> {
+        let base = pngs.load_map(slot, tile, "BaseColor", color_adjustment)?;
         let material = if material {
             Some(MaterialMaps {
-                metallic: pngs.load_map(slot, tile, "Metallic")?,
-                roughness: pngs.load_map(slot, tile, "Roughness")?,
-                normal: pngs.load_map(slot, tile, "Normal")?,
+                metallic: pngs.load_map(slot, tile, "Metallic", false)?,
+                roughness: pngs.load_map(slot, tile, "Roughness", false)?,
+                normal: pngs.load_map(slot, tile, "Normal", false)?,
             })
         } else {
             None
@@ -230,7 +255,6 @@ impl Base {
         indices: &[usize],
         textures: &BTreeMap<u16, Tile>,
         reused: &[bool],
-        alpha: Alpha,
         binding: &TextureBinding,
     ) {
         for &index in indices {
@@ -256,10 +280,9 @@ impl Base {
                 }
             });
         }
+    }
 
-        if !binding.overlay {
-            return;
-        }
+    fn set_alpha_mask(&mut self, opaque: impl Fn(u8) -> bool) {
         for (pixel, &coverage) in self
             .color
             .as_chunks_mut::<4>()
@@ -267,11 +290,7 @@ impl Base {
             .iter_mut()
             .zip(&self.coverage)
         {
-            let white = match alpha {
-                Alpha::CamoWhite => coverage == REUSED,
-                Alpha::FixedWhite => coverage != 0 && coverage != REUSED,
-            };
-            pixel[3] = if white { 255 } else { 0 };
+            pixel[3] = if opaque(coverage) { 255 } else { 0 };
         }
     }
 
@@ -287,20 +306,6 @@ impl Base {
                 pixels[target] = pixels[source];
             }
         });
-    }
-
-    fn apply_camo_backing(&mut self) {
-        // Leave the backing enabled across the padded UV islands. Only the fixed
-        // overlay changes alpha at the boundary between fixed color and camo.
-        for (pixel, &coverage) in self
-            .color
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(&self.coverage)
-        {
-            pixel[3] = if coverage != 0 { 255 } else { 0 };
-        }
     }
 }
 
@@ -426,24 +431,28 @@ fn write_skin_config(
                 "\nreplace_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{color_file}\"\n}}"
             )?;
         }
-        if let Some(backing) = &slot.camo_base_file {
+        let replace_param = if slot.camo_base_file.is_some() && !slot.remove_vehicle_decals {
+            "\n  param:t=\"camo_skin_tex\""
+        } else {
+            ""
+        };
+        let replacement = slot
+            .camo_base_file
+            .as_deref()
+            .or_else(|| slot.remove_vehicle_decals.then_some(color_file.as_str()));
+        if let Some(backing) = replacement {
             writeln!(
                 config,
-                "\nreplace_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{backing}\"\n  param:t=\"camo_skin_tex\"\n}}"
+                "\nreplace_tex{{\n  from:t=\"{color}*\"\n  to:t=\"{backing}\"{replace_param}\n}}"
             )?;
         }
         if let Some(normal_file) = &slot.material_file {
             let normal = normal_file
                 .strip_suffix(".dds")
                 .context("Missing .dds extension")?;
-            let param = if slot.camo_base_file.is_some() {
-                "\n  param:t=\"camo_skin_tex\""
-            } else {
-                ""
-            };
             writeln!(
                 config,
-                "\nreplace_tex{{\n  from:t=\"{normal}*\"\n  to:t=\"{normal_file}\"{param}\n}}"
+                "\nreplace_tex{{\n  from:t=\"{normal}*\"\n  to:t=\"{normal_file}\"{replace_param}\n}}"
             )?;
         }
     }
@@ -521,6 +530,10 @@ pub fn export_with_progress(
     mut progress: impl FnMut(Progress<'_>),
 ) -> Result<PathBuf> {
     ensure!(
+        !options.remove_vehicle_decals || options.alpha == Alpha::FixedWhite,
+        "Removing vehicle decals requires a BLK export (--alpha fixed-white)"
+    );
+    ensure!(
         CAMO_SCALE_PERCENTS.contains(&options.camo_scale_percent),
         "Choose a game camouflage scale from {CAMO_SCALE_PERCENTS:?} percent"
     );
@@ -536,6 +549,7 @@ pub fn export_with_progress(
     let profile = project.profile()?;
     let faces = &project.scene.faces;
     let pngs = PainterPngs::read(painter_pngs)?;
+    let color_table = options.color_adjustment.map(ColorTable::load).transpose()?;
     let reused: Vec<_> = project
         .scene
         .objects
@@ -557,11 +571,17 @@ pub fn export_with_progress(
             groups.push((binding, vec![(slot, name)]));
         }
     }
+    ensure!(
+        !options.remove_vehicle_decals || groups.iter().any(|(binding, _)| binding.overlay),
+        "Select a material that supports the game's fixed camouflage layer to remove decals"
+    );
 
     let mut material_owners = BTreeMap::new();
-    if options.material {
+    if options.material || options.remove_vehicle_decals {
         for (group, (binding, _)) in groups.iter().enumerate() {
-            if let Some(normal) = &binding.normal {
+            if (options.material || binding.overlay)
+                && let Some(normal) = &binding.normal
+            {
                 let aligned = binding.color.strip_suffix("_c") == normal.strip_suffix("_n");
                 let owner = material_owners
                     .entry(normal.as_str())
@@ -574,6 +594,7 @@ pub fn export_with_progress(
     }
 
     for (group, (binding, members)) in groups.into_iter().enumerate() {
+        let remove_vehicle_decals = options.remove_vehicle_decals && binding.overlay;
         let normal = binding.normal.as_deref().filter(|normal| {
             material_owners
                 .get(normal)
@@ -600,13 +621,17 @@ pub fn export_with_progress(
             });
             let mut textures: BTreeMap<_, _> = tiles
                 .into_iter()
-                .map(|tile| Ok((tile, Tile::load(&pngs, name, tile, export_material)?)))
+                .map(|tile| {
+                    let textures =
+                        Tile::load(&pngs, name, tile, export_material, color_table.is_some())?;
+                    Ok((tile, textures))
+                })
                 .collect::<Result<_>>()?;
             progress(Progress::ReprojectTextures {
                 slot: name,
                 tiles: textures.len(),
             });
-            base.paint(faces, &indices, &textures, &reused, options.alpha, binding);
+            base.paint(faces, &indices, &textures, &reused, binding);
             if binding.camouflage.is_some()
                 && indices.iter().any(|&i| {
                     let face = &faces[i];
@@ -657,6 +682,21 @@ pub fn export_with_progress(
             .iter()
             .filter(|&&coverage| coverage != 0)
             .count();
+        if let Some(table) = &color_table {
+            progress(Progress::AdjustColors(&slot_label));
+            table.apply(&mut base.color, &base.coverage);
+        }
+        if binding.overlay {
+            // Decal removal leaves the overlay transparent and lets the
+            // replacement DDS be the single mask for the Camo transition.
+            base.set_alpha_mask(|coverage| {
+                !remove_vehicle_decals
+                    && match options.alpha {
+                        Alpha::CamoWhite => coverage == REUSED,
+                        Alpha::FixedWhite => coverage != 0 && coverage != REUSED,
+                    }
+            });
+        }
         base.pad();
         let color_name = format!("{}.dds", binding.color);
         save(stage.path().join(&color_name), base.size, &base.color)?;
@@ -670,7 +710,13 @@ pub fn export_with_progress(
         let camo_base_file = if active != 0 && options.alpha == Alpha::FixedWhite {
             let stem = binding.color.strip_suffix("_c").unwrap_or(&binding.color);
             let name = format!("{stem}_camo_base.dds");
-            base.apply_camo_backing();
+            base.set_alpha_mask(|coverage| {
+                if remove_vehicle_decals {
+                    coverage == REUSED
+                } else {
+                    coverage != 0
+                }
+            });
             save(stage.path().join(&name), base.size, &base.color)?;
             Some(name)
         } else {
@@ -678,6 +724,7 @@ pub fn export_with_progress(
         };
         base_reports.push(BaseReport {
             overlay: binding.overlay,
+            remove_vehicle_decals,
             slot: slot_label,
             file: color_name,
             material_file: material_name,
@@ -696,6 +743,10 @@ pub fn export_with_progress(
     for (index, (pattern, mut camo)) in camos.into_iter().enumerate() {
         camo_pixels += camo.order.iter().filter(|&&value| value != 0).count();
         conflicts += camo.conflicts.iter().filter(|&&conflict| conflict).count();
+        if let Some(table) = &color_table {
+            progress(Progress::AdjustColors("Camo"));
+            table.apply(&mut camo.color, &camo.order);
+        }
         let pixels = camo.color.as_chunks_mut::<4>().0;
         pad_edges(camo.size, &mut camo.order, |target, source| {
             pixels[target] = pixels[source]
@@ -726,6 +777,8 @@ pub fn export_with_progress(
         base_size: options.size,
         camo_size: options.camo_size,
         camo_scale_percent: (!patterns.is_empty()).then_some(options.camo_scale_percent),
+        color_adjustment: options.color_adjustment,
+        remove_vehicle_decals: options.remove_vehicle_decals.then_some(true),
         alpha: options.alpha,
         skin_config,
         camo_pixels,
@@ -766,7 +819,7 @@ mod tests {
             .save_with_format(&name, image::ImageFormat::Png)
             .unwrap();
         let pngs = PainterPngs::read(folder.path()).unwrap();
-        let map = pngs.load_map("Turret", 1001, "BaseColor").unwrap();
+        let map = pngs.load_map("Turret", 1001, "BaseColor", false).unwrap();
         assert_eq!(map.get_pixel(0, 0).0, expected);
     }
 }

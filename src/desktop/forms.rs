@@ -9,6 +9,7 @@ use super::{
 use camo_translator::{
     bake::{Alpha, CAMO_SCALE_PERCENTS, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions},
     catalog::{is_game_root, user_skins},
+    color_adjustment::ColorAdjustment,
     materials::TextureBinding,
     prepare::PAINTER_PNG_DIR,
     scene::read_json,
@@ -310,6 +311,9 @@ pub struct ExportForm {
     camo_size: u32, // Zero uses the base map size.
     camo_scale_percent: u16,
     material: bool,
+    remove_vehicle_decals: bool,
+    adjust_colors: bool,
+    color_preset: ColorAdjustment,
     alpha: Alpha,
     inspected: PathBuf,
     brief: Option<ProjectBrief>,
@@ -333,6 +337,9 @@ impl ExportForm {
             camo_size: 0,
             camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
             material: false,
+            remove_vehicle_decals: false,
+            adjust_colors: false,
+            color_preset: ColorAdjustment::default(),
             alpha: Alpha::FixedWhite,
             inspected: PathBuf::new(),
             brief: None,
@@ -483,17 +490,17 @@ impl ExportForm {
         ));
         ComboBox::from_id_salt("mask_mode")
             .width(ui.available_width())
-            .selected_text(alpha_name(self.alpha, lang))
+            .selected_text(alpha_name(self.alpha, self.remove_vehicle_decals, lang))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.alpha,
                     Alpha::CamoWhite,
-                    alpha_name(Alpha::CamoWhite, lang),
+                    alpha_name(Alpha::CamoWhite, self.remove_vehicle_decals, lang),
                 );
                 ui.selectable_value(
                     &mut self.alpha,
                     Alpha::FixedWhite,
-                    alpha_name(Alpha::FixedWhite, lang),
+                    alpha_name(Alpha::FixedWhite, self.remove_vehicle_decals, lang),
                 );
             });
         ui.checkbox(
@@ -503,6 +510,37 @@ impl ExportForm {
                 "Also pack material channels into _n.dds",
             ),
         );
+        if self.alpha == Alpha::FixedWhite {
+            ui.checkbox(
+                &mut self.remove_vehicle_decals,
+                lang.text("去除载具贴纸", "Remove Vehicle Decals"),
+            )
+            .on_hover_text(lang.text(
+                "替换使用 Camo 遮罩的材质底图，并一起导出对应的 _n.dds。",
+                "Replace the base layer of masked camouflage materials and export their _n.dds maps.",
+            ));
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.adjust_colors,
+                lang.text("导出时调整色彩", "Adjust Colors on Export"),
+            );
+            if self.adjust_colors {
+                ui.add_space(8.0);
+                ComboBox::from_id_salt("color_adjustment_preset")
+                    .width(ui.available_width())
+                    .selected_text(color_preset_name(self.color_preset, lang))
+                    .show_ui(ui, |ui| {
+                        for preset in [ColorAdjustment::FullV2, ColorAdjustment::A3Shadows] {
+                            ui.selectable_value(
+                                &mut self.color_preset,
+                                preset,
+                                color_preset_name(preset, lang),
+                            );
+                        }
+                    });
+            }
+        });
     }
 
     pub fn show_details(&mut self, ui: &mut Ui, lang: Language) {
@@ -637,7 +675,8 @@ impl ExportForm {
                         ),
                     );
                 }
-                if self.material {
+                if self.material || (self.remove_vehicle_decals && self.alpha == Alpha::FixedWhite)
+                {
                     detail(
                         ui,
                         "_n.dds",
@@ -687,6 +726,8 @@ impl ExportForm {
             },
             camo_scale_percent: self.camo_scale_percent,
             material: self.material,
+            remove_vehicle_decals: self.remove_vehicle_decals && self.alpha == Alpha::FixedWhite,
+            color_adjustment: self.adjust_colors.then_some(self.color_preset),
             alpha: self.alpha,
             slots: self.slots.iter().cloned().collect(),
             bindings: self.bindings.clone(),
@@ -852,13 +893,24 @@ fn output(parent: &str, name: &str, allow_existing: bool) -> Result<(String, Pat
     Ok((name.to_owned(), target))
 }
 
-fn alpha_name(alpha: Alpha, lang: Language) -> &'static str {
+fn alpha_name(alpha: Alpha, remove_decals: bool, lang: Language) -> &'static str {
     match alpha {
         Alpha::CamoWhite => lang.text("Reused 遮罩为白（仅 DDS）", "White Reused Mask (DDS Only)"),
+        Alpha::FixedWhite if remove_decals => lang.text(
+            "替换底图（DDS 和 BLK）",
+            "Base Texture Replacement (DDS and BLK)",
+        ),
         Alpha::FixedWhite => lang.text(
             "固定层为白（DDS 和 BLK）",
             "White Fixed Layer (DDS and BLK)",
         ),
+    }
+}
+
+fn color_preset_name(preset: ColorAdjustment, lang: Language) -> &'static str {
+    match preset {
+        ColorAdjustment::FullV2 => lang.text("完整补偿 · v2", "Full Compensation · v2"),
+        ColorAdjustment::A3Shadows => lang.text("A3 + 暗部补偿", "A3 + Shadow Recovery"),
     }
 }
 

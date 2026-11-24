@@ -64,6 +64,24 @@ fn pixel(file: &std::path::Path, x: u32, y: u32) -> [u8; 4] {
     ]
 }
 
+fn export_skirt_fixture(
+    project: &std::path::Path,
+    out: &std::path::Path,
+    options: &[&str],
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_camo-translator-cli"))
+        .args(["export", "--project"])
+        .arg(project)
+        .arg("--textures")
+        .arg(project)
+        .arg("--out")
+        .arg(out)
+        .args(["--size", "128"])
+        .args(options)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn only_reused_faces_are_isolated_in_painter() {
     let mut faces = [face(0, 0), face(1, 0), face(2, 0), face(3, 0)];
@@ -76,14 +94,10 @@ fn only_reused_faces_are_isolated_in_painter() {
     assert!(camo_translator::atlas::first_reused_overlap(&faces, &reused).is_none());
 }
 
-#[test]
-fn reuse_is_manual_and_packed_material_covers_both_layers() {
-    use camo_translator::bake::{Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions, export};
+fn write_reused_skirt_fixture(base: &std::path::Path) -> camo_translator::scene::Project {
     use camo_translator::scene::{Object, Project, SCHEMA, Scene, write_json};
     use image::{Rgba, RgbaImage};
 
-    let folder = tempfile::tempdir().unwrap();
-    let base = folder.path();
     let mut faces = vec![face(0, 0), face(1, 0), face(2, 0)];
     // A wheel has the same UV2 as the first skirt and an independent original UV.
     faces[0].camo = Some(faces[0].original);
@@ -94,7 +108,7 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
         face.paint = face.original;
         face.tile = tile;
     }
-    let mut project = Project {
+    let project = Project {
         version: SCHEMA,
         name: "Two side skirts and a wheel".into(),
         model: "leopard_2a8".into(),
@@ -132,11 +146,28 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
                 .unwrap();
         }
     }
+    project
+}
+
+#[test]
+fn reuse_is_manual_and_packed_material_covers_both_layers() {
+    use camo_translator::bake::{Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions, export};
+    use camo_translator::scene::write_json;
+
+    let folder = tempfile::tempdir().unwrap();
+    let base = folder.path();
+    let mut project = write_reused_skirt_fixture(base);
+    let project_file = base.join("project.json");
+    let red = [220, 22, 32, 255];
+    let blue = [31, 84, 226, 255];
+    let wheel = [60, 60, 60, 255];
     let mut options = ExportOptions {
         size: 128,
         camo_size: 128,
         camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
         material: true,
+        color_adjustment: None,
+        remove_vehicle_decals: false,
         alpha: Alpha::FixedWhite,
         slots: vec!["Body".into()],
         bindings: Default::default(),
@@ -237,6 +268,164 @@ fn reuse_is_manual_and_packed_material_covers_both_layers() {
 }
 
 #[test]
+fn export_color_adjustment_matches_dds_builder_presets() {
+    use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+    use std::fs::File;
+
+    let folder = tempfile::tempdir().unwrap();
+    let base = folder.path();
+    write_reused_skirt_fixture(base);
+    let red_path = base.join("Body_BaseColor.1002.png");
+    let red_pixels = [220, 22, 32, 255].repeat(16);
+    let mut encoder = PngEncoder::new(File::create(&red_path).unwrap());
+    encoder
+        .set_icc_profile(moxcms::ColorProfile::new_srgb().encode().unwrap())
+        .unwrap();
+    encoder
+        .write_image(&red_pixels, 4, 4, ExtendedColorType::Rgba8)
+        .unwrap();
+
+    let export = |name: &str, adjustment: &[&str]| {
+        let out = base.join(name);
+        let options = [&["--material"], adjustment].concat();
+        let result = export_skirt_fixture(base, &out, &options);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        out
+    };
+    let original = export("original", &[]);
+    // Output RGB values from DDS Builder v2.1 for the fixture's three colors.
+    for (preset, args, red, blue, wheel) in [
+        (
+            "full-v2",
+            &["--color-adjustment"][..],
+            [186, 0, 11],
+            [4, 44, 207],
+            [51; 3],
+        ),
+        (
+            "a3-shadows",
+            &["--color-adjustment", "a3-shadows"][..],
+            [191, 4, 20],
+            [23, 65, 199],
+            [56; 3],
+        ),
+    ] {
+        let out = export(preset, args);
+        let [r, g, b] = red;
+        let [wr, wg, wb] = wheel;
+        let fixed = out.join("leopard_2a8_body_c.dds");
+        let backing = out.join("leopard_2a8_body_camo_base.dds");
+        let camo = out.join("camo.dds");
+        assert_eq!(pixel(&fixed, 20, 96), [r, g, b, 0]);
+        assert_eq!(pixel(&fixed, 84, 96), [wr, wg, wb, 255]);
+        assert_eq!(pixel(&backing, 12, 96), [r, g, b, 255]);
+        assert_eq!(pixel(&camo, 12, 96), [r, g, b, 255]);
+        assert_eq!(pixel(&camo, 84, 96)[..3], blue);
+        assert_eq!(pixel(&camo, 64, 20), [57, 61, 71, 255]);
+        for name in ["leopard_2a8_body_n.dds", "germ_leopard_2a8.blk"] {
+            assert_eq!(
+                std::fs::read(out.join(name)).unwrap(),
+                std::fs::read(original.join(name)).unwrap()
+            );
+        }
+        let report: serde_json::Value =
+            camo_translator::scene::read_json(&out.join("export-report.json")).unwrap();
+        assert_eq!(report["color_adjustment"], preset);
+    }
+
+    let mut encoder = png::Encoder::new(File::create(red_path).unwrap(), 4, 4);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder
+        .add_text_chunk("WTColorCompensation".into(), "DDS Builder recipe".into())
+        .unwrap();
+    let mut png = encoder.write_header().unwrap();
+    png.write_image_data(&red_pixels).unwrap();
+    png.finish().unwrap();
+
+    let fixed = original.join("leopard_2a8_body_c.dds");
+    let previous = std::fs::read(&fixed).unwrap();
+    let result = export_skirt_fixture(base, &original, &["--material", "--color-adjustment"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("WTColorCompensation"));
+    assert_eq!(std::fs::read(&fixed).unwrap(), previous);
+    let result = export_skirt_fixture(base, &original, &["--material"]);
+    assert!(result.status.success());
+    assert_eq!(std::fs::read(&fixed).unwrap(), previous);
+}
+
+#[test]
+fn remove_vehicle_decals_writes_separate_masks_and_replaces_the_normal() {
+    let folder = tempfile::tempdir().unwrap();
+    let base = folder.path();
+    let mut project = write_reused_skirt_fixture(base);
+    let project_file = base.join("project.json");
+    // The fixed triangle shares a diagonal edge with the Reused triangles in original UV.
+    project.scene.faces[2].original = [[0.4, 0.2], [0.4, 0.5], [0.1, 0.5]];
+    camo_translator::scene::write_json(&project_file, &project, false).unwrap();
+
+    let baseline = base.join("normal-export");
+    let result = export_skirt_fixture(base, &baseline, &["--material"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let out = base.join("remove-decals");
+    let result = export_skirt_fixture(base, &out, &["--remove-vehicle-decals"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let fixed_name = "leopard_2a8_body_c.dds";
+    let replacement = out.join("leopard_2a8_body_camo_base.dds");
+    assert_eq!(pixel(&out.join(fixed_name), 45, 96), [60, 60, 60, 0]);
+    assert_eq!(pixel(&out.join(fixed_name), 20, 96), [220, 22, 32, 0]);
+    assert_eq!(pixel(&replacement, 20, 96), [220, 22, 32, 255]);
+    assert_eq!(pixel(&replacement, 12, 96), [220, 22, 32, 255]);
+    assert_eq!(pixel(&replacement, 45, 96), [60, 60, 60, 0]);
+    assert_eq!(pixel(&replacement, 49, 96), [60, 60, 60, 0]);
+    assert_eq!(pixel(&replacement, 64, 20), [0, 0, 0, 0]);
+
+    let config = std::fs::read_to_string(out.join("germ_leopard_2a8.blk")).unwrap();
+    assert!(config.contains("set_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_c.dds\"\n  param:t=\"camo_skin_tex\"\n}"));
+    assert!(config.contains("replace_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_camo_base.dds\"\n}"));
+    assert!(config.contains(
+        "replace_tex{\n  from:t=\"leopard_2a8_body_n*\"\n  to:t=\"leopard_2a8_body_n.dds\"\n}"
+    ));
+    for name in ["camo.dds", "leopard_2a8_body_n.dds"] {
+        assert_eq!(
+            std::fs::read(out.join(name)).unwrap(),
+            std::fs::read(baseline.join(name)).unwrap()
+        );
+    }
+
+    // Fixed-only slots can use their all-black Alpha DDS for both directives.
+    project.scene.objects[0].path = vec!["Left".into()];
+    project.scene.objects[1].path = vec!["Right".into()];
+    camo_translator::scene::write_json(&project_file, &project, false).unwrap();
+    let out = base.join("fixed-only");
+    let result = export_skirt_fixture(base, &out, &["--remove-vehicle-decals"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!out.join("camo.dds").exists());
+    assert_eq!(pixel(&out.join(fixed_name), 20, 96), [220, 22, 32, 0]);
+    assert!(!out.join("leopard_2a8_body_camo_base.dds").exists());
+    let config = std::fs::read_to_string(out.join("germ_leopard_2a8.blk")).unwrap();
+    assert!(config.contains(
+        "replace_tex{\n  from:t=\"leopard_2a8_body_c*\"\n  to:t=\"leopard_2a8_body_c.dds\"\n}"
+    ));
+    assert!(out.join("leopard_2a8_body_n.dds").exists());
+}
+
+#[test]
 fn newly_discovered_fixed_skin_writes_native_texture_names_and_preserves_alpha() {
     use camo_translator::bake::{Alpha, DEFAULT_CAMO_SCALE_PERCENT, ExportOptions, export};
     use camo_translator::materials::{SkinProfile, TextureBinding};
@@ -294,6 +483,8 @@ fn newly_discovered_fixed_skin_writes_native_texture_names_and_preserves_alpha()
         camo_size: 128,
         camo_scale_percent: DEFAULT_CAMO_SCALE_PERCENT,
         material: true,
+        color_adjustment: None,
+        remove_vehicle_decals: false,
         alpha: Alpha::FixedWhite,
         slots: vec!["Renamed material".into(), "Second material".into()],
         bindings: [

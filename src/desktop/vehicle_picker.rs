@@ -76,13 +76,16 @@ impl VehiclePicker {
             ui.label(theme::label(lang.text("车型", "Vehicle")));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let can_refresh = self.pending.is_none() && !root.as_os_str().is_empty();
-                if ui
-                    .add_enabled(
-                        can_refresh,
-                        egui::Button::new(lang.text("重新扫描", "Rescan")).small(),
-                    )
-                    .clicked()
-                {
+                let rescan = match lang {
+                    Language::Chinese => {
+                        ui.add_enabled_ui(can_refresh, |ui| theme::compact_button(ui, "重新扫描"))
+                            .inner
+                    }
+                    Language::English => {
+                        ui.add_enabled(can_refresh, egui::Button::new("Rescan").small())
+                    }
+                };
+                if rescan.clicked() {
                     self.start_scan(ui.ctx(), true);
                 }
                 if self.pending.is_some() {

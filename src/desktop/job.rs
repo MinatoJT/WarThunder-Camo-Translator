@@ -155,6 +155,7 @@ fn progress_message(progress: Progress<'_>) -> Message {
         Progress::ReadProject => "读取项目与 UV 对照".into(),
         Progress::ReadTextures { slot, tiles } => format!("读取 {slot} 的 {tiles} 个 UDIM"),
         Progress::ReprojectTextures { slot, .. } => format!("正在回写 {slot} 贴图"),
+        Progress::AdjustColors(texture) => format!("正在补偿 {texture} 的色差"),
         Progress::ReusedUvWarning {
             slot,
             mixed,
