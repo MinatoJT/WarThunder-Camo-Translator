@@ -7,6 +7,10 @@ Camo Translator 让共用 UV 的零件也能画上不同图案。它为你放入
 
 [下载 v0.4（Windows x64）](https://github.com/MinatoJT/WarThunder-Camo-Translator/releases/tag/v0.4) 
 
+**如何贡献本项目：**
+**1.Fork本仓库**
+**2.添加bug修复或额外功能**
+**3.提交PR**
 ## 三步上手
 
 1. **准备模型。** 把想独立上色的，原来有uv复用的零件合并到一个名为 `Reused` 的对象，保留原 UV 和材质槽。在工具里选择游戏目录、载具和源模型，填写项目保存位置，点击 **生成 Painter 模型**。工具会生成 `Painter.fbx` 或 `Painter.obj`，并创建 `Painter PNG` 文件夹。
